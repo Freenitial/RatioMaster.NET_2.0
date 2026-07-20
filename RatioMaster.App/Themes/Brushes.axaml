@@ -1,0 +1,82 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ============================================================
+       Surface tones (dark). Same visual identity as the reference
+       DiscoGOGO client: near-black app background, slightly lighter
+       panels, very dark inputs with a thin blue border, cyan accent.
+       ============================================================ -->
+  <Color x:Key="DarkTitleBar">#15171B</Color>
+  <Color x:Key="DarkAppBg">#131519</Color>
+  <Color x:Key="DarkPanelBg">#1B1E24</Color>
+  <Color x:Key="DarkPanelBgAlt">#20242B</Color>
+  <Color x:Key="DarkGroupHeader">#0C1620</Color>
+  <Color x:Key="DarkBorderFaint">#1C2129</Color>
+  <Color x:Key="DarkBorder">#2A303A</Color>
+  <Color x:Key="DarkBorderHeavy">#3A4150</Color>
+  <Color x:Key="DarkHover">#252A32</Color>
+  <Color x:Key="DarkInputBg">#0F1114</Color>
+  <Color x:Key="LogBg">#0A0C0F</Color>
+  <Color x:Key="InputBorder">#26415A</Color>
+  <Color x:Key="InputBorderFocus">#0096C8</Color>
+
+  <!-- Foreground / text -->
+  <Color x:Key="TextPrimary">#FFFFFF</Color>
+  <Color x:Key="TextSecondary">#D2D7DC</Color>
+  <Color x:Key="TextMuted">#82878C</Color>
+  <Color x:Key="TextDim">#5A5A5C</Color>
+
+  <!-- Brand / accent -->
+  <Color x:Key="AccentPrimary">#0096C8</Color>
+  <Color x:Key="AccentPrimaryHover">#00B4DC</Color>
+  <Color x:Key="AccentPrimaryDeep">#004C7F</Color>
+
+  <!-- Semantic states -->
+  <Color x:Key="StateSuccess">#50E68C</Color>
+  <Color x:Key="StateWarning">#E0A020</Color>
+  <Color x:Key="StateError">#FF503C</Color>
+
+  <!-- ============================================================ Brushes -->
+  <SolidColorBrush x:Key="DarkTitleBarBrush"        Color="{StaticResource DarkTitleBar}"/>
+  <SolidColorBrush x:Key="DarkAppBgBrush"           Color="{StaticResource DarkAppBg}"/>
+  <SolidColorBrush x:Key="DarkPanelBgBrush"         Color="{StaticResource DarkPanelBg}"/>
+  <SolidColorBrush x:Key="DarkPanelBgAltBrush"      Color="{StaticResource DarkPanelBgAlt}"/>
+  <SolidColorBrush x:Key="DarkGroupHeaderBrush"     Color="{StaticResource DarkGroupHeader}"/>
+  <SolidColorBrush x:Key="DarkBorderFaintBrush"     Color="{StaticResource DarkBorderFaint}"/>
+  <SolidColorBrush x:Key="DarkBorderBrush"          Color="{StaticResource DarkBorder}"/>
+  <SolidColorBrush x:Key="DarkBorderHeavyBrush"     Color="{StaticResource DarkBorderHeavy}"/>
+  <SolidColorBrush x:Key="DarkHoverBrush"           Color="{StaticResource DarkHover}"/>
+  <SolidColorBrush x:Key="DarkInputBgBrush"         Color="{StaticResource DarkInputBg}"/>
+  <SolidColorBrush x:Key="LogBgBrush"               Color="{StaticResource LogBg}"/>
+  <SolidColorBrush x:Key="InputBorderBrush"         Color="{StaticResource InputBorder}"/>
+  <SolidColorBrush x:Key="InputBorderFocusBrush"    Color="{StaticResource InputBorderFocus}"/>
+
+  <SolidColorBrush x:Key="TextPrimaryBrush"         Color="{StaticResource TextPrimary}"/>
+  <SolidColorBrush x:Key="TextSecondaryBrush"       Color="{StaticResource TextSecondary}"/>
+  <SolidColorBrush x:Key="TextMutedBrush"           Color="{StaticResource TextMuted}"/>
+  <SolidColorBrush x:Key="TextDimBrush"             Color="{StaticResource TextDim}"/>
+
+  <SolidColorBrush x:Key="AccentPrimaryBrush"       Color="{StaticResource AccentPrimary}"/>
+  <SolidColorBrush x:Key="AccentPrimaryHoverBrush"  Color="{StaticResource AccentPrimaryHover}"/>
+  <SolidColorBrush x:Key="AccentPrimaryDeepBrush"   Color="{StaticResource AccentPrimaryDeep}"/>
+
+  <SolidColorBrush x:Key="StateSuccessBrush"        Color="{StaticResource StateSuccess}"/>
+  <SolidColorBrush x:Key="StateWarningBrush"        Color="{StaticResource StateWarning}"/>
+  <SolidColorBrush x:Key="StateErrorBrush"          Color="{StaticResource StateError}"/>
+
+  <!-- ============================================================
+       FluentTheme CheckBox + RadioButton checked-state → accent (cyan)
+       ring with white inner glyph instead of the default grey.
+       ============================================================ -->
+  <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked"              Color="{StaticResource AccentPrimary}"/>
+  <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked"            Color="{StaticResource AccentPrimary}"/>
+  <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver"   Color="{StaticResource AccentPrimaryHover}"/>
+  <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" Color="{StaticResource AccentPrimaryHover}"/>
+  <SolidColorBrush x:Key="CheckBoxCheckGlyphForegroundChecked"             Color="{StaticResource TextPrimary}"/>
+
+  <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedFill"             Color="{StaticResource AccentPrimary}"/>
+  <SolidColorBrush x:Key="RadioButtonOuterEllipseCheckedStroke"           Color="{StaticResource AccentPrimary}"/>
+  <SolidColorBrush x:Key="RadioButtonCheckGlyphFill"                      Color="{StaticResource TextPrimary}"/>
+  <SolidColorBrush x:Key="RadioButtonCheckGlyphStroke"                    Color="{StaticResource TextPrimary}"/>
+
+</ResourceDictionary>

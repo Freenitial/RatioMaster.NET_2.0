@@ -1,0 +1,379 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:RatioMaster.ViewModels"
+             xmlns:controls="using:RatioMaster.Controls"
+             xmlns:behaviors="using:RatioMaster.Behaviors"
+             xmlns:views="using:RatioMaster.Views"
+             x:Class="RatioMaster.Views.RatioTabView"
+             x:DataType="vm:RatioTabViewModel">
+
+  <UserControl.Styles>
+    <!-- Pulsing red frame overlaid on the torrent-file input while it is empty. -->
+    <Style Selector="Border.pulseoverlay">
+      <Setter Property="Opacity" Value="0"/>
+    </Style>
+    <Style Selector="Border.pulseoverlay.pulse">
+      <Style.Animations>
+        <Animation Duration="0:0:1.0" IterationCount="INFINITE" PlaybackDirection="Alternate" Easing="SineEaseInOut">
+          <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.15"/></KeyFrame>
+          <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1.0"/></KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+
+    <Style Selector="TextBlock.mini">
+      <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+      <Setter Property="FontSize" Value="{DynamicResource FontSizeXs}"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="TextBox.num">
+      <Setter Property="Width" Value="72"/>
+      <Setter Property="HorizontalContentAlignment" Value="Right"/>
+    </Style>
+    <!-- Percent spinner: up/down arrows step by 10. The unit lives in the "min %" / "max %" labels rather
+         than in FormatString: a '%' in the displayed text cannot be parsed back (no NumberStyles accepts
+         it), so typing over the value would silently revert. Plain digits keep typing AND the arrows working. -->
+    <Style Selector="NumericUpDown.pct">
+      <Setter Property="Minimum" Value="0"/>
+      <Setter Property="Maximum" Value="1000"/>
+      <Setter Property="Increment" Value="10"/>
+      <Setter Property="FormatString" Value="0"/>
+      <!-- Sized for the widest value (1000) plus the compact spinner below (~22px), not the theme's
+           original chunky arrows — 118 was allocated for those and left the number stranded. -->
+      <Setter Property="Width" Value="78"/>
+      <Setter Property="HorizontalContentAlignment" Value="Right"/>
+    </Style>
+    <!-- Compact spinner. The theme's default arrows are big square hit-zones that swallow most of the
+         control's width. Simply setting Width on PART_Increase/DecreaseButton does NOT work: the theme
+         template assigns those sizes as attributes, i.e. LOCAL values, and Avalonia's precedence puts
+         LocalValue above any style setter from an outer scope — so the setters were silently ignored.
+         Replacing the template is the only reliable route. The ContentPresenter is mandatory (it hosts
+         NumericUpDown's TextBox) and the two PART_ names are what ButtonSpinner looks up to wire the clicks.
+         Chevrons are drawn as Paths, not glyph text, which renders too small and off-centre at this size. -->
+    <Style Selector="NumericUpDown.pct /template/ ButtonSpinner">
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}">
+            <Grid ColumnDefinitions="*,Auto">
+              <ContentPresenter Grid.Column="0"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                VerticalContentAlignment="Center"/>
+              <StackPanel Grid.Column="1" Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,4,0">
+                <RepeatButton Name="PART_IncreaseButton" Classes="spin">
+                  <Path Data="M 0,4 L 4,0 L 8,4" Stretch="None"
+                        Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.4"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </RepeatButton>
+                <RepeatButton Name="PART_DecreaseButton" Classes="spin">
+                  <Path Data="M 0,0 L 4,4 L 8,0" Stretch="None"
+                        Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.4"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </RepeatButton>
+              </StackPanel>
+            </Grid>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="RepeatButton.spin">
+      <Setter Property="Width" Value="18"/>
+      <Setter Property="Height" Value="11"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="RepeatButton.spin:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource DarkBorderBrush}"/>
+    </Style>
+    <Style Selector="TextBox:disabled /template/ Border#PART_BorderElement">
+      <Setter Property="Opacity" Value="0.5"/>
+    </Style>
+  </UserControl.Styles>
+
+  <Grid Background="{DynamicResource DarkAppBgBrush}" SizeChanged="OnRootSizeChanged">
+
+    <!-- Wide (2-column) layout, in its own vertical ScrollViewer so a short window scrolls instead of
+         overflowing (buttons/graph/log). Below the narrow threshold, LeftPanel + RightPanel are reparented
+         into NarrowRoot (single scrollable column) by the code-behind — mobile / narrow friendly. -->
+    <ScrollViewer Name="WideScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Name="WideRoot" ColumnDefinitions="*,*" Margin="8,7" ColumnSpacing="10">
+
+    <!-- ═══════════════ LEFT COLUMN ═══════════════ -->
+    <Grid Name="LeftPanel" Grid.Column="0" RowDefinitions="Auto,*">
+      <StackPanel Grid.Row="0" Spacing="6">
+
+      <!-- Torrent file -->
+      <Border Classes="group">
+        <StackPanel Spacing="5">
+          <TextBlock Classes="grouphead" Text="Torrent file"/>
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <Panel Grid.Column="0">
+              <!-- Locked while a session runs: editing it would swap the tab's torrent state out from
+                   under the engine, which keeps announcing the ORIGINAL info-hash. -->
+              <TextBox Text="{Binding TorrentFilePath}" IsEnabled="{Binding InputsEnabled}"
+                       PlaceholderText="Drag &amp; drop, paste a path, or Browse…"/>
+              <Border Classes="pulseoverlay" Classes.pulse="{Binding TorrentInputPulsing}"
+                      BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="1.5"
+                      CornerRadius="3" IsHitTestVisible="False"/>
+            </Panel>
+            <Button Grid.Column="1" Content="Browse…" Click="OnBrowseClick" IsEnabled="{Binding InputsEnabled}"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Torrent info -->
+      <Border Classes="group">
+        <StackPanel Spacing="4">
+          <TextBlock Classes="grouphead" Text="Torrent info"/>
+          <Grid ColumnDefinitions="52,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="5" ColumnSpacing="6">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Tracker"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding Tracker}" IsReadOnly="True"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Hash"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding HashHex}" IsReadOnly="True" FontFamily="{DynamicResource MonoFontFamily}"/>
+            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Size"/>
+            <TextBox   Grid.Row="2" Grid.Column="1" Text="{Binding TorrentSize}" IsReadOnly="True"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Speed options. Each row is just label + rate + "Random", so the right-aligned WrapPanels handle
+           narrowing on their own (the checkbox wraps under the field) — the old column-locked SpeedNarrow
+           twin existed purely to align the min/max boxes that no longer exist. -->
+      <Border Name="SpeedCard" Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="Speed options"/>
+          <!-- Left-aligned Auto columns: label / rate / checkbox line up vertically between the two rows,
+               so the upload and download controls sit in the same three columns. -->
+          <Grid ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="10"
+                HorizontalAlignment="Left">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Upload MB/s" VerticalAlignment="Center"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Classes="num" Text="{Binding UploadSpeed}" behaviors:FieldValidation.Rule="Double"/>
+            <CheckBox  Grid.Row="0" Grid.Column="2" Content="Random" IsChecked="{Binding RandomUpload}" VerticalAlignment="Center"
+                       ToolTip.Tip="Vary the upload rate along a smooth, gradually drifting curve (about ×0.55 to ×1.15 of the value on the left) instead of a perfectly flat line. Unchecked = an exact, constant rate."/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Download MB/s" VerticalAlignment="Center"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Classes="num" Text="{Binding DownloadSpeed}" behaviors:FieldValidation.Rule="Double"/>
+            <CheckBox  Grid.Row="1" Grid.Column="2" Content="Random" IsChecked="{Binding RandomDownload}" VerticalAlignment="Center"
+                       ToolTip.Tip="Same smooth variation for the download rate, independent of the upload one."/>
+          </Grid>
+
+        </StackPanel>
+      </Border>
+
+      <!-- Options -->
+      <Border Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="Options"/>
+          <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="6" ColumnSpacing="6">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Interval (s)"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding IntervalText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Finished (%)"/>
+            <TextBox   Grid.Row="0" Grid.Column="3" Text="{Binding FinishedText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Double"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Client"/>
+            <ComboBox  Grid.Row="1" Grid.Column="1" ItemsSource="{Binding ClientFamilies}"
+                       SelectedItem="{Binding SelectedFamily}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
+            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="Version"/>
+            <ComboBox  Grid.Row="1" Grid.Column="3" ItemsSource="{Binding Versions}"
+                       SelectedItem="{Binding SelectedVersion}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Stop"/>
+            <ComboBox  Grid.Row="2" Grid.Column="1" ItemsSource="{Binding StopWhenOptions}" GotFocus="OnStopInteraction"
+                       SelectedItem="{Binding SelectedStopWhen}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
+            <StackPanel Grid.Row="2" Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+              <Panel>
+                <TextBox Width="60" Text="{Binding StopValue}" IsVisible="{Binding StopValueVisible}"
+                         IsEnabled="{Binding InputsEnabled}" GotFocus="OnStopInteraction" behaviors:FieldValidation.Rule="Double"/>
+                <Border Classes="pulseoverlay" Classes.pulse="{Binding StopValuePulsing}"
+                        BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="1.5"
+                        CornerRadius="3" IsHitTestVisible="False"/>
+              </Panel>
+              <TextBlock Classes="mini" Text="{Binding StopUnit}" IsVisible="{Binding StopUnitVisible}" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Custom client simulation -->
+      <Border Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="Custom client simulation"/>
+          <Grid ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="6">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Client key"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding CustomKey}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Port"/>
+            <TextBox   Grid.Row="0" Grid.Column="3" Width="74" Text="{Binding CustomPort}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Peer ID"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding CustomPeerId}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"/>
+            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="Peers"/>
+            <TextBox   Grid.Row="1" Grid.Column="3" Width="74" Text="{Binding CustomPeers}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
+          </Grid>
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+            <!-- WrapPanel so the two checkboxes stack when narrow instead of colliding with Regenerate. -->
+            <WrapPanel Grid.Column="0" VerticalAlignment="Center">
+              <CheckBox Content="Always new values" Margin="0,0,16,2" IsChecked="{Binding AlwaysNewValues}" IsEnabled="{Binding InputsEnabled}"/>
+              <CheckBox Content="Realistic mode" IsChecked="{Binding RealisticMode}"
+                        ToolTip.Tip="Answers connecting peers with a real BitTorrent handshake + a full bitfield, so the session looks like a genuine seeder on the wire. Recommended. (Speed variation is now the separate 'Random' checkboxes in Speed options.)"/>
+            </WrapPanel>
+            <Button Grid.Column="1" Content="Regenerate" Classes="ghost" Command="{Binding RegenerateValuesCommand}" IsEnabled="{Binding InputsEnabled}"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      </StackPanel>
+
+      <!-- Action buttons — 4-across when wide; the code-behind reflows them to 2x2 when narrow. -->
+      <Grid Name="ActionBar" Grid.Row="1" ColumnDefinitions="*,*,*,*" ColumnSpacing="6" RowSpacing="6" Margin="0,6,0,0">
+        <Panel Grid.Column="0">
+          <Button Classes="accent action" Content="START" Command="{Binding StartCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44"/>
+          <Border Classes="pulseoverlay" Classes.pulse="{Binding StartButtonPulsing}"
+                  BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="2"
+                  CornerRadius="4" IsHitTestVisible="False"/>
+        </Panel>
+        <Button Grid.Column="1" Classes="danger action" Content="STOP" Command="{Binding StopCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44"/>
+        <Button Grid.Column="2" Classes="action wraptext" Command="{Binding ManualUpdateCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44">
+          <TextBlock Text="Manual update" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center"/>
+        </Button>
+        <Button Grid.Column="3" Classes="action wraptext" Command="{Binding SetDefaultsCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44">
+          <TextBlock Text="Set defaults" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center"/>
+        </Button>
+      </Grid>
+    </Grid>
+
+    <!-- ═══════════════ RIGHT COLUMN ═══════════════ -->
+    <Grid Name="RightPanel" Grid.Column="1" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="6">
+
+      <!-- Other settings -->
+      <Border Grid.Row="0" Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="Other settings"/>
+          <!-- WrapPanel so the checkboxes wrap onto new lines when narrow instead of overflowing to the right. -->
+          <WrapPanel>
+            <CheckBox Content="Use TCP listener" Margin="0,0,18,4" IsChecked="{Binding UseTcpListener}"/>
+            <CheckBox Content="Request scrape" Margin="0,0,18,4" IsChecked="{Binding RequestScrape}"/>
+            <CheckBox Content="Ignore 'failure reason'" Margin="0,0,0,4" IsChecked="{Binding IgnoreFailureReason}"/>
+          </WrapPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Proxy -->
+      <Border Grid.Row="1" Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="Proxy server settings"/>
+          <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="6">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Type"/>
+            <ComboBox  Grid.Row="0" Grid.Column="1" ItemsSource="{Binding ProxyTypes}" SelectedItem="{Binding SelectedProxyType}"
+                       HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Host"/>
+            <TextBox   Grid.Row="0" Grid.Column="3" Text="{Binding ProxyHost}" IsEnabled="{Binding InputsEnabled}"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="User"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding ProxyUser}" IsEnabled="{Binding InputsEnabled}"/>
+            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="Port"/>
+            <TextBox   Grid.Row="1" Grid.Column="3" Text="{Binding ProxyPort}" IsEnabled="{Binding InputsEnabled}"/>
+          </Grid>
+          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+            <TextBlock Grid.Column="0" Classes="label" Text="Pass"/>
+            <TextBox Grid.Column="1" Text="{Binding ProxyPass}" PasswordChar="•" IsEnabled="{Binding InputsEnabled}"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- On next update: random speed LEVEL, as a percentage of the configured MB/s. Spinners step by 10%.
+           Applied internally by the engine — it never writes back into the speed field. -->
+      <Border Grid.Row="2" Classes="group">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="grouphead" Text="On next update — get random speeds"/>
+          <TextBlock Classes="hint" Text="At each announce the rate jumps to a random level within this range, as a % of the speed set above (100% = exactly that speed)."/>
+          <!-- WrapPanel per direction: on a narrow card the spinner group drops to its own line under the
+               checkbox instead of overflowing off the right edge (which it did well before the layout
+               switched to a single column). The fixed checkbox width keeps both rows aligned. -->
+          <StackPanel Spacing="6">
+            <WrapPanel>
+              <CheckBox Content="Upload" Width="88" VerticalAlignment="Center" Margin="0,0,0,4"
+                        IsChecked="{Binding NextRandUp}"/>
+              <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,0,4">
+                <TextBlock Classes="mini" Text="min %"/>
+                <NumericUpDown Classes="pct" Value="{Binding NextRandUpMinPercent}"/>
+                <TextBlock Classes="mini" Text="max %"/>
+                <NumericUpDown Classes="pct" Value="{Binding NextRandUpMaxPercent}"/>
+              </StackPanel>
+            </WrapPanel>
+            <WrapPanel>
+              <CheckBox Content="Download" Width="88" VerticalAlignment="Center" Margin="0,0,0,4"
+                        IsChecked="{Binding NextRandDown}"/>
+              <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,0,4">
+                <TextBlock Classes="mini" Text="min %"/>
+                <NumericUpDown Classes="pct" Value="{Binding NextRandDownMinPercent}"/>
+                <TextBlock Classes="mini" Text="max %"/>
+                <NumericUpDown Classes="pct" Value="{Binding NextRandDownMaxPercent}"/>
+              </StackPanel>
+            </WrapPanel>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Live upload graph (top, 1/3) + terminal log (bottom, 2/3) -->
+      <Border Grid.Row="3" Classes="group">
+        <Grid RowDefinitions="Auto,*,2*,Auto">
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto">
+            <TextBlock Grid.Column="0" Classes="grouphead" Text="Activity" VerticalAlignment="Center" Margin="0"/>
+            <CheckBox Grid.Column="1" Content="Enable log" IsChecked="{Binding EnableLog}" Margin="14,0,0,0" VerticalAlignment="Center"/>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+              <Button Content="Clear" Classes="ghost" Command="{Binding ClearLogCommand}"/>
+              <Button Content="Save" Classes="ghost" Click="OnSaveLogClick"/>
+            </StackPanel>
+          </Grid>
+
+          <!-- Upload-rate graph — a MinHeight floor in both modes; the wide layout now scrolls (WideScroll)
+               so the floor no longer forces overflow when the window is short. -->
+          <Border Name="GraphBorder" Grid.Row="1" MinHeight="64" Background="{DynamicResource LogBgBrush}" BorderBrush="{DynamicResource DarkBorderFaintBrush}"
+                  BorderThickness="1" CornerRadius="4" Margin="0,6,0,0">
+            <Panel ClipToBounds="True">
+              <controls:Sparkline Values="{Binding GraphValues}" Margin="1"/>
+              <TextBlock Classes="mini" Text="Upload rate" Margin="7,4,0,0" VerticalAlignment="Top" HorizontalAlignment="Left"/>
+            </Panel>
+          </Border>
+
+          <!-- Terminal log. MaxHeight is ESSENTIAL, not cosmetic: both layouts live inside a vertical
+               ScrollViewer (WideScroll / NarrowRoot), which measures with INFINITE height — so the `2*` row
+               above degenerates to Auto and an uncapped TextBox reports the full height of its text as its
+               desired height. Every new log line then grew the whole page and stretched the Stretch-aligned
+               action buttons into giant blocks. Capping it keeps the log a fixed-size terminal that scrolls
+               internally (its own scrollbar below), and the code-behind keeps the caret at the end so the
+               newest line stays visible. -->
+          <Border Name="LogBorder" Grid.Row="2" MinHeight="118" MaxHeight="272" Background="{DynamicResource LogBgBrush}" BorderBrush="{DynamicResource DarkBorderFaintBrush}"
+                  BorderThickness="1" CornerRadius="4" Margin="0,6,0,0">
+            <TextBox Name="LogBox" Text="{Binding LogText}" IsReadOnly="True" AcceptsReturn="True"
+                     TextWrapping="NoWrap" Background="Transparent" BorderThickness="0"
+                     FontFamily="{DynamicResource MonoFontFamily}" FontSize="9.5"
+                     Foreground="{DynamicResource TextSecondaryBrush}" VerticalContentAlignment="Top"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+          </Border>
+
+          <!-- Alert line: the CURRENT engine condition (green OK / yellow warning / red error), as opposed
+               to the append-only log above. The row is ALWAYS reserved (fixed MinHeight, no IsVisible
+               toggle) so a message appearing or clearing can never shift the layout. One line only —
+               overflow is ellipsised; the full text stays in the log. -->
+          <Border Grid.Row="3" MinHeight="22" Margin="0,5,0,0">
+            <TextBlock Text="{Binding AlertMessage}" FontWeight="SemiBold" FontSize="11.5"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxLines="1"
+                       Foreground="{Binding AlertLevel, Converter={x:Static views:BoolBrushConverters.AlertText}}"/>
+          </Border>
+        </Grid>
+      </Border>
+    </Grid>
+    </Grid>
+    </ScrollViewer>
+
+    <!-- Narrow (single-column, scrollable) layout — LeftPanel + RightPanel are moved in here in code. -->
+    <ScrollViewer Name="NarrowRoot" IsVisible="False"
+                  HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+      <StackPanel Name="NarrowStack" Spacing="8" Margin="8,7"/>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

@@ -1,0 +1,168 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- ONE codebase, every desktop OS + Android. `DesktopRid` (a plain property so it's available
+         before the TFM is read) drives BOTH the RID and the TFM, so a single
+         `dotnet publish -p:DesktopRid=<rid>` cross-targets win-x64/arm64, linux-x64/arm64, osx-x64/arm64.
+         Windows RIDs use the -windows TFM (OS ICU + Win32 manifest); the rest use plain net11.0. -->
+    <!-- Also accept a plain `-r <rid>` / -p:RuntimeIdentifier: derive DesktopRid from it so the
+         TFM + static-Skia switch stay in sync (a bare -r alone would otherwise keep the win-x64
+         defaults and mis-target). -p:DesktopRid still wins. -->
+    <DesktopRid Condition="'$(DesktopRid)' == '' and '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</DesktopRid>
+    <DesktopRid Condition="'$(DesktopRid)' == ''">win-x64</DesktopRid>
+    <IsWindowsBuild Condition="$(DesktopRid.StartsWith('win'))">true</IsWindowsBuild>
+    <IsWindowsBuild Condition="!$(DesktopRid.StartsWith('win'))">false</IsWindowsBuild>
+    <!-- Static Skia/HarfBuzz single-file is win-x64 only (the static .lib package ships win-x64 libs). -->
+    <UseStaticSkia Condition="'$(DesktopRid)' == 'win-x64'">true</UseStaticSkia>
+    <UseStaticSkia Condition="'$(DesktopRid)' != 'win-x64'">false</UseStaticSkia>
+
+    <!-- ANDROID head. `-p:IncludeAndroid=true` (set ONLY by build_RatioMaster_setup.bat's apk/aab
+         phase) flips this project to net11.0-android and turns EVERY desktop-only switch OFF (no RID,
+         no AOT, no static Skia, no Win32 manifest). The desktop build is byte-for-byte unchanged when
+         it's unset — no separate project, no branch, just this one gate. Needs the toolchain:
+         `dotnet workload install android` + a JDK + the Android SDK (the bat self-acquires those). -->
+    <IsWindowsBuild Condition="'$(IncludeAndroid)' == 'true'">false</IsWindowsBuild>
+    <UseStaticSkia Condition="'$(IncludeAndroid)' == 'true'">false</UseStaticSkia>
+
+    <TargetFramework Condition="'$(IncludeAndroid)' == 'true'">net11.0-android</TargetFramework>
+    <TargetFramework Condition="'$(IncludeAndroid)' != 'true' AND '$(IsWindowsBuild)' == 'true'">net11.0-windows10.0.17763.0</TargetFramework>
+    <TargetFramework Condition="'$(IncludeAndroid)' != 'true' AND '$(IsWindowsBuild)' != 'true'">net11.0</TargetFramework>
+
+    <OutputType Condition="'$(IncludeAndroid)' == 'true'">Exe</OutputType>
+    <OutputType Condition="'$(IncludeAndroid)' != 'true'">WinExe</OutputType>
+    <!-- Desktop RID only. Android determines its own ABIs (arm64-v8a/x86_64/…) via the workload. -->
+    <RuntimeIdentifier Condition="'$(IncludeAndroid)' != 'true'">$(DesktopRid)</RuntimeIdentifier>
+    <Platforms>AnyCPU;x64</Platforms>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- `publish\` holds desktop build output (incl. Linux libSkiaSharp.so / libHarfBuzzSharp.so). Keep it
+         out of ALL default item globs so the Android build doesn't try to package those .so as native
+         libs (XA4301 "cannot determine ABI"). Harmless on desktop (nothing there is project source). -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);publish\**</DefaultItemExcludes>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RatioMaster</RootNamespace>
+    <AssemblyName>RatioMaster.NET</AssemblyName>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+    <NoWarn>$(NoWarn);NETSDK1206</NoWarn>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <Version>2.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <!-- Windows-only knobs: Win32 manifest (DPI), embedded exe icon, OS ICU, COM interop. -->
+  <PropertyGroup Condition="'$(IsWindowsBuild)' == 'true'">
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <!-- Android head knobs. versionCode/versionName come from the bat (-p:ApplicationVersion /
+       -p:ApplicationDisplayVersion) so the APK version tracks the desktop builds. -->
+  <PropertyGroup Condition="'$(IncludeAndroid)' == 'true'">
+    <Nullable>enable</Nullable>
+    <ApplicationId>net.ratiomaster.app</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>2.0.0</ApplicationDisplayVersion>
+    <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <AndroidManifest>Properties\AndroidManifest.xml</AndroidManifest>
+    <!-- IL2104 = the aggregate "assembly produced trim warnings". The only assembly that trips it is
+         Avalonia.DesignerSupport — a DESIGN-TIME-ONLY assembly (the XAML previewer, dead at runtime) that
+         Avalonia ships (BOTH stable and nightly emit this). Benign. Our OWN trim issues would surface as
+         their specific codes (IL2026/IL2091/IL2075/…), which stay visible — so this silences exactly the
+         third-party design-time noise and nothing of ours (same spirit as DiscoGOGO's IL3053/XA1006). -->
+    <NoWarn>$(NoWarn);IL2104</NoWarn>
+  </PropertyGroup>
+
+  <!-- Release = Native AOT on every DESKTOP platform (win/linux/osx). NOT Android (CoreCLR + r8/d8). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' AND '$(IncludeAndroid)' != 'true'">
+    <PublishAot>true</PublishAot>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <!-- Windows static build keeps ICU (the proven static-Skia recipe uses the OS ICU); the
+         non-Windows AOT turns it OFF so a portable Linux/macOS binary needs no system ICU
+         (all of this app's own parsing/formatting is already explicit InvariantCulture). -->
+    <InvariantGlobalization Condition="'$(IsWindowsBuild)' == 'true'">false</InvariantGlobalization>
+    <InvariantGlobalization Condition="'$(IsWindowsBuild)' != 'true'">true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Optimize>true</Optimize>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+    <NoWarn>$(NoWarn);IL3053</NoWarn>
+  </PropertyGroup>
+
+  <!-- win-x64 ONLY: statically link Skia + HarfBuzz into the exe for a true single file. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' AND '$(UseStaticSkia)' == 'true'">
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <StaticExecutable>true</StaticExecutable>
+  </PropertyGroup>
+
+  <!-- Emit direct calls to the static Skia/HarfBuzz symbols + the system .lib files the link needs. -->
+  <ItemGroup Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true'">
+    <DirectPInvoke Include="libHarfBuzzSharp" />
+    <DirectPInvoke Include="libSkiaSharp" />
+    <LinkerArg Include="Gdi32.lib;User32.lib" />
+    <LinkerArg Include="Ole32.lib" />
+    <LinkerArg Include="fontsub.lib;USP10.lib" />
+    <LinkerArg Include="/LTCG" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <!-- Android-only: the Android windowing backend, drop the SDK's implicit Android.App/Android.Widget
+       usings (they collide with Avalonia.Application / Avalonia.Layout.Orientation), and exclude the
+       desktop entry point (MainActivity.cs is the Android entry, gated on #if ANDROID). -->
+  <ItemGroup Condition="'$(IncludeAndroid)' == 'true'">
+    <PackageReference Include="Avalonia.Android" Version="12.0.5" />
+    <Using Remove="Android.App" />
+    <Using Remove="Android.Widget" />
+    <Compile Remove="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.5" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+  <!-- Desktop-only windowing backend (Win32/X11/macOS). Android uses Avalonia.Android instead. -->
+  <ItemGroup Condition="'$(IncludeAndroid)' != 'true'">
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.5" />
+  </ItemGroup>
+
+  <!-- Static .lib for Skia + HarfBuzz — win-x64 only. Everywhere else Avalonia's normal native
+       assets (libSkiaSharp.so / .dylib / .dll) flow transitively and ship alongside the binary. -->
+  <ItemGroup Condition="'$(UseStaticSkia)' == 'true'">
+    <PackageReference Include="2ndLAB.SkiaSharp.Static" Version="3.119.0-10.0.26100.0-1.1c7d845" />
+  </ItemGroup>
+
+  <!-- Publish cleanup: always drop link-time .pdb/.lib. ANGLE (av_libglesv2.dll) is dropped on EVERY
+       Windows build (x64 AND arm64) because Program.cs forces the software renderer on all Windows
+       (Win32RenderingMode.Software, gated on OperatingSystem.IsWindows) so GLES is never loaded — it was
+       5 MB of dead weight in the arm64 .zip. The Skia/HarfBuzz DLLs are dropped ONLY on the win-x64 static
+       build (they're linked into the exe there); the multi-file arm64/linux builds keep them because they
+       load Skia as a real native library. Never runs for Android. -->
+  <Target Name="StripPublishExtras" AfterTargets="Publish" Condition="'$(Configuration)' == 'Release' AND '$(IncludeAndroid)' != 'true'">
+    <ItemGroup>
+      <_Extra Include="$(PublishDir)*.pdb" />
+      <_Extra Include="$(PublishDir)*.lib" />
+      <_Extra Include="$(PublishDir)libSkiaSharp.dll" Condition="'$(UseStaticSkia)' == 'true'" />
+      <_Extra Include="$(PublishDir)libHarfBuzzSharp.dll" Condition="'$(UseStaticSkia)' == 'true'" />
+      <_Extra Include="$(PublishDir)av_libglesv2.dll" Condition="'$(IsWindowsBuild)' == 'true'" />
+    </ItemGroup>
+    <Delete Files="@(_Extra)" />
+  </Target>
+
+</Project>

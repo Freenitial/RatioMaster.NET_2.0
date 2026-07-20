@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="net.ratiomaster.app">
+  <!-- versionCode/versionName are injected by build_RatioMaster_setup.bat (-p:ApplicationVersion /
+       -p:ApplicationDisplayVersion) so the APK version tracks the Windows/Linux builds. -->
+  <!-- minSdk 24 (Android 7.0) = the practical Avalonia floor (gates which devices can INSTALL).
+       targetSdk = the newest STABLE Android API the build machine has installed; the bat re-asserts it
+       per build. Bump when Google raises the Play target-API floor (~yearly). -->
+  <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+
+  <!-- Raw-socket tracker announces + scrape over LAN/Internet → INTERNET. ACCESS_NETWORK_STATE lets
+       the app react to connectivity changes. -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+  <!-- Keeping a session alive while the app is backgrounded. Without a foreground service the process is
+       "cached": Doze/App Standby throttle its network and timers and the system can reclaim it, so the
+       session would silently stop — the mobile equivalent of the Windows tray keeping the process alive.
+       FOREGROUND_SERVICE_SPECIAL_USE (API 34+) matches the specialUse service type; the alternative,
+       dataSync, is capped at ~6 h/day since Android 15, which defeats long seeding runs.
+       POST_NOTIFICATIONS (API 33+) is a RUNTIME permission and is requested on first launch — the service
+       still runs if it is denied, the user just won't see its notification.
+       WAKE_LOCK keeps the CPU from sleeping mid-announce. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <application android:label="RatioMaster.NET"
+               android:icon="@mipmap/icon"
+               android:allowBackup="true"
+               android:supportsRtl="true">
+  </application>
+</manifest>

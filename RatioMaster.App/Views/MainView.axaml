@@ -1,0 +1,112 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:RatioMaster.ViewModels"
+             xmlns:views="using:RatioMaster.Views"
+             x:Class="RatioMaster.Views.MainView"
+             x:DataType="vm:MainWindowViewModel"
+             Background="{DynamicResource DarkAppBgBrush}"
+             FontFamily="{DynamicResource UiFontFamily}"
+             TopLevel.AutoSafeAreaPadding="False">
+
+  <!-- Shared root, used by BOTH the desktop Window (hosts this) and the Android single-view (App sets this
+       as MainView). AutoSafeAreaPadding is OFF (Avalonia's auto safe-area double-stacked with ours → the
+       big top gap). On Android the code-behind scales ScaledContent ×1.25 and fits it inside the REAL safe
+       area (Services.MobileInsets, fed by the AndroidX listener). On desktop ScaledContent just stretches. -->
+  <Grid Name="RootGrid">
+    <Grid Name="ScaledContent">
+    <Grid RowDefinitions="Auto,*,Auto">
+
+    <!-- ── Tab strip (tabs + close + add, with Local IP on the same line) ── -->
+    <Border Grid.Row="0" Background="{DynamicResource DarkTitleBarBrush}"
+            BorderBrush="{DynamicResource DarkBorderBrush}" BorderThickness="0,0,0,1"
+            Padding="8,5,12,0">
+      <Grid ColumnDefinitions="*,Auto">
+        <!-- Overflow handling: no scrollbar — a ‹ chevron (far left) and a › chevron (far right),
+             plus mouse-wheel / touch-swipe. Arrows appear only when the tabs overflow. The + button
+             lives INSIDE the scroll, right after the last tab (not pinned to the right edge). -->
+        <Grid Grid.Column="0" ColumnDefinitions="Auto,*,Auto">
+          <Button Name="TabLeftBtn" Grid.Column="0" Classes="tabnav" IsVisible="False"
+                  Click="OnTabScrollLeft" ToolTip.Tip="Scroll tabs left">
+            <Path Width="8" Height="15" Stretch="None" StrokeThickness="1.7"
+                  StrokeLineCap="Round" StrokeJoin="Round" Data="M 6.5,1 L 1.5,7.5 L 6.5,14"/>
+          </Button>
+          <ScrollViewer Name="TabScroll" Grid.Column="1"
+                        HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled"
+                        PointerWheelChanged="OnTabWheel">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom">
+              <ItemsControl Name="TabStrip" ItemsSource="{Binding Tabs}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal"/>
+                  </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RatioTabViewModel">
+                    <Button Classes="tab" Classes.active="{Binding IsActive}"
+                            Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).SelectTabCommand}"
+                            CommandParameter="{Binding}">
+                      <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                        <!-- Dot = this tab's state: grey idle, green running, yellow warning, RED error —
+                             so a tab in trouble is visible from the strip even when it isn't selected. -->
+                        <Ellipse Width="7" Height="7" VerticalAlignment="Center"
+                                 Fill="{Binding DotState, Converter={x:Static views:BoolBrushConverters.TabDot}}"/>
+                        <TextBlock Text="{Binding TabName}" VerticalAlignment="Center"/>
+                        <Button Classes="tabclose" Content="✕"
+                                Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).CloseTabCommand}"
+                                CommandParameter="{Binding}"/>
+                      </StackPanel>
+                    </Button>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <Button Classes="tabadd" Content="+" Command="{Binding AddTabCommand}" VerticalAlignment="Bottom"
+                      ToolTip.Tip="New RatioMaster tab"/>
+            </StackPanel>
+          </ScrollViewer>
+          <Button Name="TabRightBtn" Grid.Column="2" Classes="tabnav" IsVisible="False"
+                  Click="OnTabScrollRight" ToolTip.Tip="Scroll tabs right">
+            <Path Width="8" Height="15" Stretch="None" StrokeThickness="1.7"
+                  StrokeLineCap="Round" StrokeJoin="Round" Data="M 1.5,1 L 6.5,7.5 L 1.5,14"/>
+          </Button>
+        </Grid>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center" Margin="0,0,0,4">
+          <TextBlock Text="Local IP" Classes="label" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding LocalIp}" Classes="value" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ── Active tab content ── -->
+    <ContentControl Grid.Row="1" Content="{Binding SelectedTab}">
+      <ContentControl.ContentTemplate>
+        <DataTemplate x:DataType="vm:RatioTabViewModel">
+          <views:RatioTabView/>
+        </DataTemplate>
+      </ContentControl.ContentTemplate>
+    </ContentControl>
+
+    <!-- ── Status bar (status text + live stats) ── -->
+    <Border Grid.Row="2" Background="{DynamicResource DarkTitleBarBrush}"
+            BorderBrush="{DynamicResource DarkBorderBrush}" BorderThickness="0,1,0,0"
+            Padding="12,5">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <TextBlock Name="StatusTextBlock" Grid.Column="0" Text="{Binding SelectedTab.StatusText}" Classes="stat"
+                   Foreground="{DynamicResource TextSecondaryBrush}" MaxWidth="320" TextTrimming="CharacterEllipsis"/>
+
+        <StackPanel Name="StatsPanel" Grid.Column="2" Orientation="Horizontal" Spacing="24">
+          <TextBlock Classes="stat"><Run Text="Ratio "/><Run Text="{Binding SelectedTab.RatioText}" Foreground="{DynamicResource AccentPrimaryHoverBrush}" FontWeight="SemiBold"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="↑ "/><Run Text="{Binding SelectedTab.UploadedText}" Foreground="{DynamicResource StateSuccessBrush}"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="↓ "/><Run Text="{Binding SelectedTab.DownloadedText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Classes="stat" Text="{Binding SelectedTab.SeedersText}"/>
+          <TextBlock Classes="stat" Text="{Binding SelectedTab.LeechersText}"/>
+          <TextBlock Classes="stat"><Run Text="Time "/><Run Text="{Binding SelectedTab.TotalTimeText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="Next "/><Run Text="{Binding SelectedTab.TimerText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    </Grid>
+    </Grid>
+  </Grid>
+</UserControl>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Theme used by MainActivity (Theme="@style/MyTheme.NoActionBar"). MUST descend from an AppCompat
+       theme: Avalonia's AvaloniaMainActivity is an AppCompatActivity, which throws at onCreate
+       ("You need to use a Theme.AppCompat theme") under a plain @android:Theme.*. Dark, no action bar,
+       black system-bar + window background so the brief native window before Avalonia's first frame
+       matches the app's dark surface (no white flash). Android-only — inert on desktop. -->
+  <style name="MyTheme.NoActionBar" parent="Theme.AppCompat.NoActionBar">
+    <item name="android:windowBackground">@android:color/black</item>
+    <item name="android:statusBarColor">@android:color/black</item>
+    <item name="android:navigationBarColor">@android:color/black</item>
+  </style>
+</resources>

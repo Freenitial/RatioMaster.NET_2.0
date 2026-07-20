@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RatioMaster.NET
+Comment=BitTorrent ratio emulator
+Exec=RatioMaster.NET
+Icon=ratiomaster
+Categories=Network;Utility;
+Terminal=false

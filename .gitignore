@@ -1,0 +1,44 @@
+# ── .NET build output ──────────────────────────────────────────────────────────
+# Covers the Android obj/bin trees too (they live under the same project folder).
+bin/
+obj/
+
+# Desktop publish output: RatioMaster.App/publish/<rid>/ (and the Linux AppDir built inside it).
+publish/
+
+# ── Installer artefacts ────────────────────────────────────────────────────────
+# Packaged .exe / .zip / .AppImage / .apk / .aab. The bat recreates this folder, so ignoring the whole
+# directory is safe. Releases belong on GitHub Releases, not in the tree.
+Installer/Output/
+
+# Generated INSIDE Installer/Data. Everything else there (AppRun, RatioMaster.desktop) is a required build
+# INPUT consumed when packaging the Linux AppImage — do not ignore or delete those.
+Installer/Data/last_update_check.txt
+Installer/Data/rm_linux_aot.sh
+Installer/Data/aarch64-aot-ld
+
+# ── Runtime state ──────────────────────────────────────────────────────────────
+# Portable session file, written next to the executable — so it can turn up under any publish/bin folder.
+# Deliberately unanchored: it follows the exe wherever it runs, and it holds local torrent paths.
+ratiomaster.session
+*.log
+
+# ── Android signing material ───────────────────────────────────────────────────
+# Precautionary: RM_ANDROID_KEYSTORE can point at any path, including inside the repo. Committing a
+# release keystore permanently burns the app signing identity.
+*.keystore
+*.jks
+
+# ── IDE / tooling ──────────────────────────────────────────────────────────────
+.vs/
+.idea/
+*.user
+*.DotSettings.user
+msbuild.binlog
+
+# ── OS noise ───────────────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# Builder backup of AndroidManifest.xml (restored + deleted by the bat unless a run is interrupted)
+*.rmbak

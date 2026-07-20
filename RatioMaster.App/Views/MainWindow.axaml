@@ -1,0 +1,17 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:RatioMaster.ViewModels"
+        xmlns:views="using:RatioMaster.Views"
+        x:Class="RatioMaster.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="{Binding Title}"
+        Width="1000" Height="740"
+        MinWidth="360" MinHeight="360"
+        WindowStartupLocation="CenterScreen"
+        Icon="/Assets/icon.ico"
+        Background="{DynamicResource DarkAppBgBrush}"
+        FontFamily="{DynamicResource UiFontFamily}">
+
+  <!-- Desktop shell = the shared MainView (the same view the Android single-view lifetime uses). -->
+  <views:MainView/>
+</Window>

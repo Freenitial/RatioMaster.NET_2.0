@@ -1,0 +1,18 @@
+# Normalise text on commit, and let each platform check out what it expects.
+* text=auto
+
+# LF is MANDATORY for these — they are executed by Linux inside the AppImage. Checked out with CRLF
+# (the Windows default) the shebang becomes "#!/bin/sh\r" and the AppImage fails to start with a
+# "bad interpreter" error that gives no hint about line endings.
+Installer/Data/AppRun    text eol=lf
+*.sh                     text eol=lf
+*.desktop                text eol=lf
+
+# Batch files are parsed by cmd.exe, which wants CRLF.
+*.bat                    text eol=crlf
+
+# Binary: never touch these.
+*.png    binary
+*.ico    binary
+*.jks    binary
+*.keystore binary
