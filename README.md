@@ -11,11 +11,11 @@ No torrent client has to be installed or running.
 
 ## Download
 
-- [Windows x64](https://github.com/Freenitial/RatioMaster.NET/releases/latest/download/RatioMaster.NET_win-x64_v2.0.0.exe) — one file, nothing to install
-- [Windows ARM64](https://github.com/Freenitial/RatioMaster.NET/releases/latest/download/RatioMaster.NET_win-arm64_v2.0.0.zip)
-- [Linux x86_64](https://github.com/Freenitial/RatioMaster.NET/releases/latest/download/RatioMaster.NET_v2.0.0_x86_64.AppImage) — AppImage, `chmod +x` then run
-- [Linux aarch64](https://github.com/Freenitial/RatioMaster.NET/releases/latest/download/RatioMaster.NET_v2.0.0_aarch64.AppImage)
-- [Android](https://github.com/Freenitial/RatioMaster.NET/releases/latest/download/RatioMaster.NET_android_v2.0.0.apk)
+- [Windows x64](https://github.com/Freenitial/RatioMaster.NET_2.0/releases/latest/download/RatioMaster.NET_win-x64_v2.0.0.exe) — one file, nothing to install
+- [Windows ARM64](https://github.com/Freenitial/RatioMaster.NET_2.0/releases/latest/download/RatioMaster.NET_win-arm64_v2.0.0.zip)
+- [Linux x86_64](https://github.com/Freenitial/RatioMaster.NET_2.0/releases/latest/download/RatioMaster.NET_v2.0.0_x86_64.AppImage) — AppImage, `chmod +x` then run
+- [Linux aarch64](https://github.com/Freenitial/RatioMaster.NET_2.0/releases/latest/download/RatioMaster.NET_v2.0.0_aarch64.AppImage)
+- [Android](https://github.com/Freenitial/RatioMaster.NET_2.0/releases/latest/download/RatioMaster.NET_android_v2.0.0.apk)
 
 ## Quick start
 
