@@ -27,6 +27,11 @@ internal sealed class TrackerResponse
 
     internal bool DoRedirect { get; private set; }
 
+    /// <summary>HTTP status line code (0 if unparsable). A tracker behind a CDN can answer 5xx with an
+    /// HTML/plain error page that is obviously not bencode; reporting that as "could not decode" hides the
+    /// real cause, so callers check this first.</summary>
+    internal int StatusCode { get; private set; }
+
     /// <summary>The gzip body exceeded <see cref="MaxBodyBytes"/> and was refused, so this response carries
     /// no usable content. Distinguishes "hostile/oversized reply" from "could not reach the tracker".</summary>
     internal bool Oversized { get; private set; }
@@ -89,6 +94,8 @@ internal sealed class TrackerResponse
                 chunked = true;
             }
         }
+
+        StatusCode = statusCode;
 
         if (statusCode is >= 300 and < 400 && RedirectionUrl.Length > 0)
         {

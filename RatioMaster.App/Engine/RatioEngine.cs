@@ -425,8 +425,14 @@ internal sealed class RatioEngine(IEngineHost host)
             TrackerResponse? response = await trackerClient.RequestAsync(url, cfg.Client, ct).ConfigureAwait(false);
             if (response?.Dict == null)
             {
-                Log?.Invoke("No connection to tracker.");
-                Alert(EngineAlert.Error, "No connection to tracker.", sessionGen);
+                // Separate "we never got a usable reply" from "the tracker's server answered with an
+                // error". A CDN 5xx in front of the tracker is the tracker being broken/unreachable at
+                // ITS end; blaming the local connection sends the user debugging the wrong machine.
+                string why = response is { StatusCode: >= 400 }
+                    ? $"Tracker error HTTP {response.StatusCode} — the tracker's server is failing, not your connection."
+                    : "No connection to tracker.";
+                Log?.Invoke(why);
+                Alert(EngineAlert.Error, why, sessionGen);
                 return;
             }
 

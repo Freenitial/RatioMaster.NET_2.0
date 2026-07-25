@@ -140,9 +140,21 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
 
                 if (response.Dict == null)
                 {
+                    // Lead with the HTTP status when it is an error: a 5xx from a CDN in front of the
+                    // tracker (Cloudflare 520/521/522…) means the TRACKER's own server failed, which has
+                    // nothing to do with our connection — reporting it as "failed to decode" then
+                    // "no connection to tracker" sent users chasing their own network instead.
+                    if (response.StatusCode >= 400)
+                    {
+                        log($"*** Tracker returned HTTP {response.StatusCode} — the tracker's server refused or failed, not a local network problem.");
+                    }
+                    else
+                    {
+                        log("*** Failed to decode tracker response:");
+                    }
+
                     // Truncate: an undecodable body can be megabytes of binary, and the log is built by
                     // string concatenation on the UI thread before it is trimmed.
-                    log("*** Failed to decode tracker response:");
                     log(response.Body.Length > 2000 ? response.Body[..2000] + "… (truncated)" : response.Body);
                 }
 

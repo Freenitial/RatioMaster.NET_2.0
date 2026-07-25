@@ -55,8 +55,7 @@ internal sealed class RandomStringGenerator
         string digits = upperCase ? "0123456789ABCDEF" : "0123456789abcdef";
         foreach (byte b in bytes)
         {
-            // Unreserved per the BitTorrent convention: ASCII letters and digits pass through verbatim.
-            if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9'))
+            if (IsUnreserved(b))
             {
                 sb.Append((char)b);
             }
@@ -68,4 +67,20 @@ internal sealed class RandomStringGenerator
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The unreserved set libtorrent's <c>escape_string</c> uses (RFC 2396 §2.3 minus the apostrophe):
+    /// alphanumerics plus <c>-_.!~*()</c>.
+    /// </summary>
+    /// <remarks>
+    /// The punctuation matters. Escaping only alphanumerics is still a VALID URL — a tracker decodes it to
+    /// the same bytes — but it is not what the emulated clients actually send, and the difference is plainly
+    /// visible in the raw query: real qBittorrent announces "peer_id=-qB5100-xxxx" while escaping everything
+    /// yields "peer_id=%2dqB5100%2dxxxx". A tracker logging raw queries can pick that out at a glance, which
+    /// is exactly the kind of tell an emulation profile exists to avoid. The same set applies to info_hash,
+    /// since libtorrent escapes both with the one function.
+    /// </remarks>
+    private static bool IsUnreserved(byte b) =>
+        (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+        || b is (byte)'-' or (byte)'_' or (byte)'.' or (byte)'!' or (byte)'~' or (byte)'*' or (byte)'(' or (byte)')';
 }
