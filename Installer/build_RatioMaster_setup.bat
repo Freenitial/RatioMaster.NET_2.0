@@ -415,17 +415,22 @@ if ($doApk -or $doAab) {
         $androidArgs = @("-p:AndroidSdkDirectory=$androidSdk", "-p:JavaSdkDirectory=$androidJdk", '-p:AcceptAndroidSdkLicenses=True', '-p:IncludeAndroid=true', "-p:ApplicationDisplayVersion=$ver", "-p:ApplicationVersion=$verCode")
 
         # aapt2 (APT2265) + the D8 dexer choke on spaces / non-ASCII in the PROJECT path or %TEMP%.
-        $hostile = ($root -match '[^\x21-\x7E]') -or ($env:TEMP -match '[^\x21-\x7E]')
+        # The junction is only needed when the PROJECT path is hostile.
         $apkProj = $proj; $junction = $null; $savedTemp = $env:TEMP; $savedTmp = $env:TMP
-        if ($hostile) {
+        if ($root -match '[^\x21-\x7E]') {
             $junction = Join-Path $env:SystemDrive 'rm-apk'
             try { if (Test-Path $junction) { & cmd /c "rmdir `"$junction`"" 2>&1 | Out-Null }
                   & cmd /c "mklink /J `"$junction`" `"$root`"" 2>&1 | Out-Null } catch {}
             $jp = Join-Path $junction 'RatioMaster.App\RatioMaster.App.csproj'
             if ([IO.File]::Exists($jp)) { $apkProj = $jp }
-            $asciiTmp = Join-Path $env:SystemDrive 'rm-tmp'
-            try { New-Item -ItemType Directory -Force -Path $asciiTmp | Out-Null; $env:TEMP = $asciiTmp; $env:TMP = $asciiTmp } catch {}
         }
+        # %TEMP% is redirected UNCONDITIONALLY. Testing it first looked reasonable but was unsound: Windows
+        # often reports TEMP in 8.3 short form (C:\Users\LOGILL~1\...), which is pure ASCII and passes the
+        # test, while the path Java actually resolves is the long one (C:\Users\Léo GILLET\...) — d8 then
+        # dies with "Error in flag file argument: '@C:\Users\LÚo'", mangling the accent AND splitting at
+        # the space. Redirecting always costs nothing and removes the whole class of failure.
+        $asciiTmp = Join-Path $env:SystemDrive 'rm-tmp'
+        try { New-Item -ItemType Directory -Force -Path $asciiTmp | Out-Null; $env:TEMP = $asciiTmp; $env:TMP = $asciiTmp } catch {}
         $manPath = Join-Path $appDir 'Properties\AndroidManifest.xml'
         $manOrig = $null; $rc = $null; $rcAab = $null
         try {
