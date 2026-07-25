@@ -122,5 +122,5 @@ public partial class MainWindowViewModel : ObservableObject
 
 internal static class AppInfo
 {
-    internal const string Version = "2.0";
+    internal const string Version = "2.0.1";
 }

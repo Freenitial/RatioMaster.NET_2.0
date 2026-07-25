@@ -50,7 +50,7 @@
     <NoWarn>$(NoWarn);NETSDK1206</NoWarn>
     <IsAotCompatible>true</IsAotCompatible>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <Version>2.0.0</Version>
+    <Version>2.0.1</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -67,8 +67,8 @@
   <PropertyGroup Condition="'$(IncludeAndroid)' == 'true'">
     <Nullable>enable</Nullable>
     <ApplicationId>net.ratiomaster.app</ApplicationId>
-    <ApplicationVersion>1</ApplicationVersion>
-    <ApplicationDisplayVersion>2.0.0</ApplicationDisplayVersion>
+    <ApplicationVersion>2</ApplicationVersion>
+    <ApplicationDisplayVersion>2.0.1</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidManifest>Properties\AndroidManifest.xml</AndroidManifest>

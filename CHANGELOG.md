@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1
+
+- **Accurate error messages** — a tracker answering with an HTTP error (a Cloudflare 5xx, for instance)
+  was reported as "no connection to tracker", which blamed your own network for a failure on the
+  tracker's server. The status code is now shown for what it is.
+- **Announce matches qBittorrent byte for byte** — URL escaping now keeps the same unreserved characters
+  libtorrent does, so the query no longer stands out in a tracker's logs.
+
 ## 2.0.0 — re-fork by Freenitial
 
 Full rewrite from WinForms / .NET Framework 4.8 to **Avalonia 12 / .NET 11**.
