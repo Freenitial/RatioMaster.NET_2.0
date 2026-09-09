@@ -5,7 +5,7 @@
         x:Class="RatioMaster.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="{Binding Title}"
-        Width="1000" Height="740"
+        Width="1000" Height="668"
         MinWidth="360" MinHeight="360"
         WindowStartupLocation="CenterScreen"
         Icon="/Assets/icon.ico"

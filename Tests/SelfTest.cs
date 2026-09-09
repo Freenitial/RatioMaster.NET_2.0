@@ -13,6 +13,7 @@ using RatioMaster.BitTorrent;
 using RatioMaster.Engine;
 using RatioMaster.Models;
 using RatioMaster.Services;
+using RatioMaster.ViewModels;
 
 /// <summary>
 /// Debug-only end-to-end check (run: <c>RatioMaster.NET.exe --selftest</c>). Spins up a
@@ -52,6 +53,8 @@ internal static class SelfTest
         listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         listener.Start();
         bool serving = true;
+        int announceRequests = 0;
+        using ManualResetEventSlim manualAnnounced = new();
         Thread server = new(() =>
         {
             while (serving)
@@ -66,6 +69,7 @@ internal static class SelfTest
                     return;
                 }
 
+                if (ctx.Request.Url!.AbsolutePath.Contains("announce")) Interlocked.Increment(ref announceRequests);
                 byte[] body = ctx.Request.Url!.AbsolutePath.Contains("scrape")
                     ? ScrapeResponse(infoHash)
                     : AnnounceResponse();
@@ -74,6 +78,10 @@ internal static class SelfTest
                 ctx.Response.ContentLength64 = body.Length;
                 ctx.Response.OutputStream.Write(body, 0, body.Length);
                 ctx.Response.OutputStream.Close();
+                if (ctx.Request.Url!.AbsolutePath.Contains("announce") && ctx.Request.QueryString["event"] is null)
+                {
+                    manualAnnounced.Set();
+                }
             }
         })
         { IsBackground = true };
@@ -84,7 +92,12 @@ internal static class SelfTest
         RatioEngine engine = new(host);
         engine.Log += Log;
         EngineStats? last = null;
-        engine.Stats += s => last = s;
+        using ManualResetEventSlim progressed = new();
+        engine.Stats += s =>
+        {
+            last = s;
+            if (s.Uploaded > 0 && s.IntervalRemaining is > 0 and <= 120) progressed.Set();
+        };
 
         SessionConfig cfg = new()
         {
@@ -95,7 +108,7 @@ internal static class SelfTest
             InfoHash = infoHash,
             TotalLength = (long)torrent.TotalLength,
             FinishedPercent = 100,
-            Interval = 120,
+            Interval = 1800,
             Port = "6881",
             Key = "abcd1234",
             PeerID = "-qB5030-selftest1234",
@@ -103,17 +116,27 @@ internal static class SelfTest
         };
 
         engine.Start(cfg);
-        Thread.Sleep(4000);
-        engine.Stop();
-        Thread.Sleep(700);
+        progressed.Wait(TimeSpan.FromSeconds(5));
+        EngineStats? scheduled = last;
+        engine.ManualUpdate();
+        bool manualSent = manualAnnounced.Wait(TimeSpan.FromSeconds(5));
+        engine.StopAsync().GetAwaiter().GetResult();
         serving = false;
         listener.Stop();
+        server.Join(TimeSpan.FromSeconds(5));
 
         // 4. Assertions.
         string joined = string.Join("\n", log);
-        bool connected = joined.Contains("Connected successfully");
+        bool connected = Volatile.Read(ref announceRequests) >= 2;
         bool gotPeers = joined.Contains("peers:");
         bool intervalUpdated = joined.Contains("Updating interval: 120");
+        bool countdownUpdated = scheduled is { IntervalRemaining: > 110 and <= 120 };
+        const long GiB = 1024L * 1024 * 1024;
+        bool sizeWarning = RatioTabViewModel.IsSmallTorrent(8 * GiB - 1)
+            && !RatioTabViewModel.IsSmallTorrent(8 * GiB)
+            && !RatioTabViewModel.IsSmallTorrent(10 * GiB);
+        bool countdownFormat = Format.Countdown(3661) == "01:01:01"
+            && Format.Countdown(59) == "00:00:59" && Format.Countdown(-1) == "00:00:00";
         bool uploadedGrew = last is { Uploaded: > 0 };
         bool noProcessError = !joined.Contains("process found") && !joined.Contains("client is running");
 
@@ -121,23 +144,18 @@ internal static class SelfTest
         // (a byte-swapped port would read 57626, the classic bug this pins down).
         bool gotPeers6 = joined.Contains("peers6:") && joined.Contains("[2001:db8::1]:6881");
 
-        // The engine must surface the live swarm state to the tab's alert line (green, 3 leechers > 0).
-        bool alerted = host.LastAlertLevel == EngineAlert.Ok && host.LastAlertMessage.Contains("3 leechers");
-
-        // "On next update" percent → multiplier. Rolling it end-to-end would need a >60s run (it fires once
-        // per announce), so the conversion is asserted directly: the defaults must map 50..150% to 0.5..1.5
-        // (a missing ÷100 would silently multiply every rate by a hundred), min/max may be reversed, and a
-        // negative percent must clamp to 0 rather than run the counters backwards.
-        bool percentMath =
-            RatioEngine.PercentToMultiplier(50, 150, 0.0) == 0.5 &&
-            RatioEngine.PercentToMultiplier(50, 150, 1.0) == 1.5 &&
-            RatioEngine.PercentToMultiplier(50, 150, 0.5) == 1.0 &&
-            RatioEngine.PercentToMultiplier(200, 200, 0.7) == 2.0 &&
-            RatioEngine.PercentToMultiplier(150, 50, 0.0) == 0.5 &&
-            RatioEngine.PercentToMultiplier(-10, 0, 0.0) == 0.0;
+        // Tracker health and swarm counters use separate UI fields.
+        bool alerted = host.LastAlertLevel == EngineAlert.Ok && host.LastAlertMessage == "Tracker OK";
 
         bool legacySession = LegacySessionLoads();
-        bool profilesValid = ClientProfilesValid();
+        bool profilesValid = ProfileSelfTest.Run();
+        bool udpValid = UdpSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool formatsValid = TorrentFormatSelfTest.Run();
+        bool statesValid = SessionStateSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool bencodeBounds = BencodeBounds();
+        bool lifecycleValid = EngineLifecycleSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool persistenceValid = PersistenceSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool networkValid = NetworkTransportSelfTest.Run() == 0;
 
         Console.WriteLine();
         Console.WriteLine("──────── RESULTS ────────");
@@ -145,105 +163,63 @@ internal static class SelfTest
         Report("Peers parsed (IPv4)", gotPeers);
         Report("Peers parsed (IPv6 / peers6, BEP 7)", gotPeers6);
         Report("Interval honored (120s)", intervalUpdated);
+        Report("Tracker interval replaces configured countdown (1800 -> 120)", countdownUpdated);
+        Report("Small torrent warning boundary (strictly below 8 GiB)", sizeWarning);
+        Report("Countdown uses HH:mm:ss", countdownFormat);
+        Report("Confirmed manual update sends an announce without waiting for the next tick", manualSent);
         Report($"Uploaded counter grew ({(last?.Uploaded ?? 0)} bytes, ratio {last?.Ratio})", uploadedGrew);
         Report($"Alert surfaced to UI ({host.LastAlertLevel}: {host.LastAlertMessage})", alerted);
-        Report("Next-update percent → multiplier (50-150% = x0.5-x1.5)", percentMath);
-        Report("Pre-refactor session still loads (new keys default)", legacySession);
-        Report("Every client profile: 20 printable bytes + Transmission checksum", profilesValid);
+        Report("Session counters and legacy random flags are preserved", legacySession);
+        Report("Client profile encodings, builds and checksums", profilesValid);
         Report("No 'client not running' error", noProcessError);
 
         bool pass = connected && gotPeers && gotPeers6 && intervalUpdated && uploadedGrew && alerted
-            && percentMath && legacySession && profilesValid && noProcessError;
+            && legacySession && profilesValid && noProcessError
+            && countdownUpdated && sizeWarning && countdownFormat && manualSent
+            && udpValid && formatsValid && statesValid && bencodeBounds && lifecycleValid && persistenceValid && networkValid;
         Console.WriteLine();
         Console.WriteLine(pass ? "✅ SELF-TEST PASSED" : "❌ SELF-TEST FAILED");
         return pass ? 0 : 1;
     }
 
-    private static void Report(string name, bool ok) => Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}");
-
-    /// <summary>
-    /// Every shipped profile must produce a peer_id of exactly 20 PRINTABLE bytes, and Transmission's tail
-    /// must satisfy its mod-36 checksum. This pins down the whole class of defects the legacy client table
-    /// carried: a tail that percent-encoding would expand (so the peer_id announced to the tracker differed
-    /// from the one presented in the peer handshake), and a Transmission tail drawn from the wrong alphabet
-    /// with no checksum, which any tracker can verify as forged.
-    /// </summary>
-    private static bool ClientProfilesValid()
+    private static bool BencodeBounds()
     {
-        const string TrPool = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-        foreach (ClientFamily family in ClientCatalog.Families)
+        foreach (string invalid in new[] { "1000000000:x", "5:abc", new string('l', 70) + new string('e', 70) })
         {
-            foreach (string version in family.Versions)
+            try
             {
-                ClientProfile p = ClientCatalog.Create(family.Name, version);
-                if (p.PeerID.Length != 20)
-                {
-                    return false;
-                }
-
-                foreach (char c in p.PeerID)
-                {
-                    if (c < 32 || c > 126)
-                    {
-                        return false; // non-printable => percent-encoding would change the announced form
-                    }
-                }
-
-                if (family.Name == "Transmission")
-                {
-                    int total = 0;
-                    foreach (char c in p.PeerID[8..])
-                    {
-                        int i = TrPool.IndexOf(c);
-                        if (i < 0)
-                        {
-                            return false; // outside libtransmission's base-36 pool
-                        }
-
-                        total += i;
-                    }
-
-                    if (total % 36 != 0)
-                    {
-                        return false;
-                    }
-                }
+                using MemoryStream stream = new(Encoding.ASCII.GetBytes(invalid));
+                BEncode.Parse(stream);
+                Report("Reject malformed bencoding", false);
+                return false;
             }
+            catch (TorrentException) { }
         }
-
+        Report("Reject excessive lengths, truncated strings and deep bencoding", true);
         return true;
     }
 
-    /// <summary>
-    /// A real <c>ratiomaster.session</c> written by a PRE-refactor build must still load. The speed-random
-    /// schema changed twice (the per-second "+ random" min/max and the MB-based "on next update" ranges were
-    /// both dropped for per-direction "Random" flags and percent spinners), so this pins the upgrade path:
-    /// removed keys must be ignored rather than throw, retained keys must survive, and the new keys must
-    /// fall back to their defaults instead of coming back as false/0 — which would silently hand the user
-    /// an upgraded app with Random switched off and a 0% speed level.
-    /// </summary>
+    private static void Report(string name, bool ok) => Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}");
+
+    /// <summary>Unknown JSON settings are ignored and session counters survive deserialization.</summary>
     private static bool LegacySessionLoads()
     {
         const string Legacy = """
         {"Tabs":[{"TabName":"RM 1","TorrentFilePath":"C:\\x.torrent","UploadSpeed":"100","RandUp":true,
         "RandUpMin":"20","RandUpMax":"300","DownloadSpeed":"0","RandDown":false,"RandDownMin":"0",
-        "RandDownMax":"0","RealisticMode":true,"NextRandUp":true,"NextRandUpMin":"50","NextRandUpMax":"100",
-        "NextRandDown":false,"EnableLog":true,"Uploaded":123,"Downloaded":456}]}
+        "RandDownMax":"0","RealisticMode":true,"EnableLog":true,"Uploaded":123,"Downloaded":456}]}
         """;
 
         try
         {
-            SessionData? data = JsonSerializer.Deserialize(Legacy, AppJsonContext.Default.SessionData);
+            SessionData? data = SessionStore.Decode(Legacy);
             TabState? t = data?.Tabs.FirstOrDefault();
             return t is not null
                 && t.UploadSpeed == "100" && t.DownloadSpeed == "0"   // retained as-is
-                && t.RealisticMode                                     // retained (now wire-protocol only)
-                && t.NextRandUp                                        // retained opt-in flag
+                && t.RealisticMode                                     // retained
+
                 && t.Uploaded == 123 && t.Downloaded == 456            // resume counters survive
-                && t.RandomUpload && t.RandomDownload                  // NEW -> must default to true
-                && t.NextRandUpMinPercent == 50 && t.NextRandUpMaxPercent == 150
-                && t.NextRandDownMinPercent == 50 && t.NextRandDownMaxPercent == 150;
+                && t.RandomUpload && !t.RandomDownload;
         }
         catch
         {
@@ -281,8 +257,8 @@ internal static class SelfTest
     {
         using MemoryStream ms = new();
         void A(string s) => ms.Write(Latin1.GetBytes(s));
-        byte[] pieces = new byte[20];
-        for (int i = 0; i < 20; i++)
+        byte[] pieces = new byte[checked((int)((length + 262143) / 262144) * 20)];
+        for (int i = 0; i < pieces.Length; i++)
         {
             pieces[i] = (byte)(i + 1);
         }
@@ -293,7 +269,7 @@ internal static class SelfTest
         A($"6:lengthi{length}e");
         A($"4:name{name.Length}:{name}");
         A("12:piece lengthi262144e");
-        A("6:pieces20:");
+        A($"6:pieces{pieces.Length}:");
         ms.Write(pieces);
         A("ee");
         return ms.ToArray();
@@ -305,7 +281,6 @@ internal static class SelfTest
 
         public bool RequestScrape => true;
 
-        public bool IgnoreFailureReason => false;
 
         public long UploadRateBytes => 100 * 1024;
 
@@ -318,18 +293,6 @@ internal static class SelfTest
         public bool RandomDownloadEnabled => false;
 
         // Off too, so the asserted byte count stays exact.
-        public bool NextRandUpEnabled => false;
-
-        public double NextRandUpMinPercent => 50;
-
-        public double NextRandUpMaxPercent => 150;
-
-        public bool NextRandDownEnabled => false;
-
-        public double NextRandDownMinPercent => 50;
-
-        public double NextRandDownMaxPercent => 150;
-
         public string StopWhen => "Never";
 
         public string StopValue => string.Empty;

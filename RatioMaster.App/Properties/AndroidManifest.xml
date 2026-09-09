@@ -13,18 +13,11 @@
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-  <!-- Keeping a session alive while the app is backgrounded. Without a foreground service the process is
-       "cached": Doze/App Standby throttle its network and timers and the system can reclaim it, so the
-       session would silently stop — the mobile equivalent of the Windows tray keeping the process alive.
-       FOREGROUND_SERVICE_SPECIAL_USE (API 34+) matches the specialUse service type; the alternative,
-       dataSync, is capped at ~6 h/day since Android 15, which defeats long seeding runs.
-       POST_NOTIFICATIONS (API 33+) is a RUNTIME permission and is requested on first launch — the service
-       still runs if it is denied, the user just won't see its notification.
-       WAKE_LOCK keeps the CPU from sleeping mid-announce. -->
+  <!-- Foreground-service status and notifications for active sessions, including paused sessions.
+       Android may still restrict background networking or stop the process. -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-  <uses-permission android:name="android.permission.WAKE_LOCK" />
 
   <application android:label="RatioMaster.NET"
                android:icon="@mipmap/icon"

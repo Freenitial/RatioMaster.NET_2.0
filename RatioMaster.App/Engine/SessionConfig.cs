@@ -25,6 +25,8 @@ internal sealed class SessionConfig
 
     internal required string Key { get; init; }
 
+    internal bool KeyIsGenerated { get; init; }
+
     internal required string PeerID { get; init; }
 
     internal required string NumWant { get; init; }
@@ -32,9 +34,7 @@ internal sealed class SessionConfig
     /// <summary>Number of pieces (for the realistic-mode wire bitfield). 0 = unknown.</summary>
     internal int PieceCount { get; init; }
 
-    /// <summary>Realistic mode — WIRE PROTOCOL ONLY: answer connecting peers with a real BitTorrent
-    /// handshake + full bitfield so we look like a genuine seeder. The speed-curve half of the old
-    /// "realistic mode" is now the per-direction "Random" checkboxes, read live off the host.</summary>
+    /// <summary>Answer peer handshakes and advertise a full bitfield only when complete.</summary>
     internal bool Realistic { get; init; }
 
     /// <summary>Resume: cumulative uploaded/downloaded to start from (0 = fresh).</summary>
@@ -45,6 +45,10 @@ internal sealed class SessionConfig
 
 internal sealed class EngineStats
 {
+    internal bool IsActive { get; init; }
+    internal double SampleElapsedSeconds { get; init; }
+    internal EngineAlert AlertLevel { get; init; }
+    internal string AlertMessage { get; init; } = string.Empty;
     internal long Uploaded { get; init; }
 
     internal long Downloaded { get; init; }
@@ -68,4 +72,7 @@ internal sealed class EngineStats
     internal string NumPeers { get; init; } = "0";
 
     internal bool SeedMode { get; init; }
+    internal bool IsPaused { get; init; }
+    internal bool UploadPausedNoLeechers { get; init; }
+    internal bool IsAnnouncing { get; init; }
 }

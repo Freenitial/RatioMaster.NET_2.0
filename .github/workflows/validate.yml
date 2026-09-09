@@ -1,0 +1,58 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the repository SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: global.json
+
+      - name: Install Linux drawing dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfontconfig1 libfreetype6
+
+      - name: Build and run protocol, state and headless UI checks
+        shell: pwsh
+        run: ./Installer/validate_RatioMaster.ps1
+
+      - name: Verify macOS packaging script syntax
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash -n Installer/package_macos.sh
+
+      - name: Build the local macOS application bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash Installer/package_macos.sh
+

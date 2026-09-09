@@ -1,49 +1,58 @@
 namespace RatioMaster.BitTorrent;
 
-using System;
 using System.IO;
-using System.Security.Cryptography;
 
-/// <summary>A parsed .torrent metainfo file (tracker URL, info-hash, size, name).</summary>
+/// <summary>A validated BEP 3 / BEP 52 metainfo snapshot.</summary>
 internal sealed class Torrent
 {
-    private ValueDictionary data = new();
-    private ulong totalLengthValue;
+    private TorrentMetainfo? metadata;
 
     internal Torrent()
     {
     }
 
-    internal Torrent(string localFilename) => OpenTorrent(localFilename);
+    internal Torrent(string localFilename)
+    {
+        using FileStream stream = File.OpenRead(localFilename);
+        metadata = TorrentMetainfo.Read(stream);
+    }
 
-    /// <summary>Parse from an already-open stream — used on Android, where the file picker returns a
-    /// <c>content://</c> URI (no filesystem path) and the bytes are read via the storage stream instead.</summary>
-    internal Torrent(Stream stream) => OpenTorrent(stream);
+    /// <summary>Reads from the current position, leaving the caller's stream open.</summary>
+    internal Torrent(Stream stream) => metadata = TorrentMetainfo.Read(stream);
 
-    internal ulong TotalLength => totalLengthValue;
+    private TorrentMetainfo Metadata => metadata
+        ?? throw new IncompleteTorrentData("No torrent has been loaded.");
 
-    /// <summary>Number of pieces (SHA-1 hashes / 20) — for the realistic-mode wire bitfield.</summary>
-    internal int PieceCount { get; private set; }
+    /// <summary>Swarm byte length; hybrids include their v1 padding files.</summary>
+    internal ulong TotalLength => Metadata.TotalLength;
 
-    internal ValueDictionary Info => (ValueDictionary)data["info"];
+    /// <summary>Piece indexes in the selected swarm; v2 files each start on a piece boundary.</summary>
+    internal int PieceCount => Metadata.PieceCount;
 
-    private bool SingleFile => ((ValueDictionary)data["info"]).Contains("length");
+    internal ValueDictionary Info => Metadata.Info;
 
-    /// <summary>SHA-1 of the bencoded "info" dictionary — the torrent's info-hash (20 bytes).</summary>
-    internal byte[] InfoHash => SHA1.HashData(data["info"].Encode());
+    /// <summary>20-byte wire hash: SHA-1 for v1/hybrid, first 20 SHA-256 bytes for pure v2.</summary>
+    internal byte[] InfoHash => (byte[])Metadata.InfoHash.Clone();
 
-    internal string Name => BEncode.String(((ValueDictionary)data["info"])["name"]) ?? string.Empty;
+    /// <summary>SHA-256 (32 bytes) for v2/hybrid, SHA-1 (20 bytes) for v1, over original info bytes.</summary>
+    internal byte[] FullInfoHash => (byte[])Metadata.FullInfoHash.Clone();
 
-    internal string Announce => BEncode.String(data["announce"]) ?? string.Empty;
+    /// <summary>True when a validated v2 description is present, including hybrids.</summary>
+    internal bool IsV2 => Metadata.IsV2;
+
+    internal bool IsHybrid => Metadata.IsHybrid;
+
+    internal string Name => Metadata.Name;
+
+    /// <summary>Announce URL, first announce-list URL, or empty for trackerless metainfo.</summary>
+    internal string Announce => Metadata.Announce;
 
     internal bool OpenTorrent(string localFilename)
     {
         try
         {
-            using FileStream fs = File.OpenRead(localFilename);
-            data = (ValueDictionary)BEncode.Parse(fs);
-            LoadTorrent();
-            return true;
+            using FileStream stream = File.OpenRead(localFilename);
+            return OpenTorrent(stream);
         }
         catch (IOException)
         {
@@ -51,62 +60,17 @@ internal sealed class Torrent
         }
     }
 
-    /// <summary>Parse the metainfo from an open stream (read in full during this call). Malformed data throws
-    /// <see cref="TorrentException"/> just like the file overload; an I/O failure returns false.</summary>
+    /// <summary>Commits only a fully validated snapshot. I/O failures return false; format errors throw.</summary>
     internal bool OpenTorrent(Stream stream)
     {
         try
         {
-            data = (ValueDictionary)BEncode.Parse(stream);
-            LoadTorrent();
+            metadata = TorrentMetainfo.Read(stream);
             return true;
         }
         catch (IOException)
         {
             return false;
-        }
-    }
-
-    private void LoadTorrent()
-    {
-        if (!data.Contains("announce"))
-        {
-            throw new IncompleteTorrentData("No tracker URL");
-        }
-
-        if (!data.Contains("info"))
-        {
-            throw new IncompleteTorrentData("No internal torrent information");
-        }
-
-        ValueDictionary info = (ValueDictionary)data["info"];
-
-        if (!info.Contains("pieces"))
-        {
-            throw new IncompleteTorrentData("No piece hash data");
-        }
-
-        ValueString pieces = (ValueString)info["pieces"];
-        if ((pieces.Length % 20) != 0)
-        {
-            throw new IncompleteTorrentData("Missing or damaged piece hash codes");
-        }
-
-        PieceCount = pieces.Bytes.Length / 20;
-
-        if (SingleFile)
-        {
-            totalLengthValue = (ulong)((ValueNumber)info["length"]).Integer;
-        }
-        else
-        {
-            totalLengthValue = 0;
-            ValueList files = (ValueList)info["files"];
-            foreach (object entry in files)
-            {
-                ValueDictionary file = (ValueDictionary)entry;
-                totalLengthValue += (ulong)((ValueNumber)file["length"]).Integer;
-            }
         }
     }
 }

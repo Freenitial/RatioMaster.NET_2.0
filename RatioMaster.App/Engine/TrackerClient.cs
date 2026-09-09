@@ -1,465 +1,370 @@
 namespace RatioMaster.Engine;
 
-using System;
-using System.IO;
+using System.Globalization;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using RatioMaster.Models;
 
-/// <summary>
-/// Sends BitTorrent tracker announce/scrape requests over a raw socket so the
-/// pre-percent-encoded info_hash in the query survives verbatim (HttpClient/Uri
-/// would re-normalise it). Supports HTTPS and HTTP/SOCKS4/4a/5 proxies.
-/// </summary>
+/// <summary>Bounded HTTP tracker transport preserving escaped request targets and explicit proxy routing.</summary>
 internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
 {
+    private const int MaxRedirects = 5;
+    private const int MaxConnectAttempts = 5;
     private static readonly Encoding Latin1 = Encoding.Latin1;
+    private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
+    internal TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     internal async Task<TrackerResponse?> RequestAsync(string url, ClientProfile client, CancellationToken ct)
     {
-        for (int redirect = 0; redirect < 5; redirect++)
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(RequestTimeout);
+        try
         {
-            if (!TryParseUrl(url, out string scheme, out string host, out int port, out string pathAndQuery))
+            for (int redirect = 0; ; redirect++)
             {
-                log("Invalid tracker URL: " + url);
-                return null;
-            }
-
-            bool https = scheme.Equals("https", StringComparison.OrdinalIgnoreCase);
-            Socket? socket = null;
-            Stream? stream = null;
-            try
-            {
-                // Bound EVERY network step (connect + TLS handshake + write + read) so a slow-loris,
-                // blackhole or MITM tracker can't wedge an announce forever: ioCt trips on the session's
-                // ct OR after a hard timeout. Without it, a stalled TLS handshake or a withheld response
-                // body hangs until process exit and (because announceBusy is only cleared in the caller's
-                // finally) freezes every later announce for the session, not just this one.
-                using CancellationTokenSource io = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                io.CancelAfter(TimeSpan.FromSeconds(30));
-                CancellationToken ioCt = io.Token;
-
+                if (!TryParseUrl(url, out string scheme, out string host, out int port, out string pathAndQuery))
+                    throw new IOException("Invalid HTTP tracker URL.");
+                CancellationToken ioCt = deadline.Token;
+                bool https = scheme == "https";
                 log($"Connecting to tracker ({host}) on port {port}");
-                socket = await ConnectAsync(host, port, ioCt).ConfigureAwait(false);
-                log("Connected successfully");
+                using Socket socket = await ConnectAsync(host, port, ioCt).ConfigureAwait(false);
+                using NetworkStream network = new(socket, ownsSocket: false);
+                using SslStream? tls = https ? new(network, leaveInnerStreamOpen: true) : null;
+                Stream stream = tls ?? (Stream)network;
+                if (tls is not null)
+                    await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = host }, ioCt).ConfigureAwait(false);
 
-                stream = new NetworkStream(socket, ownsSocket: false);
-                if (https)
-                {
-                    // Certificate validation is left at the .NET default (it used to be a callback that
-                    // returned true for ANY certificate). The announce query carries the tracker passkey,
-                    // so accepting any certificate meant a machine-in-the-middle could read the passkey AND
-                    // hand back a bencode response the engine then trusted. TargetHost drives SNI, which is
-                    // what modern trackers behind Cloudflare require.
-                    SslStream ssl = new(stream, leaveInnerStreamOpen: false);
-                    await ssl.AuthenticateAsClientAsync(
-                        new SslClientAuthenticationOptions { TargetHost = host }, ioCt).ConfigureAwait(false);
-                    stream = ssl;
-                }
-
-                string headers = client.Headers.Replace("{host}", host);
-                if (!headers.ToLowerInvariant().Contains("connection: close"))
-                {
-                    headers = headers.TrimEnd('\r', '\n') + "\r\nConnection: close\r\n";
-                }
-                else if (!headers.EndsWith("\r\n", StringComparison.Ordinal))
-                {
-                    headers += "\r\n";
-                }
-
-                string request = $"GET {pathAndQuery} {client.HttpProtocol}\r\n{headers}\r\n";
-                request = request.TrimEnd('\r', '\n') + "\r\n\r\n";
+                string request = BuildRequest(pathAndQuery, Authority(host, port, https ? 443 : 80), client);
                 log("======== Sending Command to Tracker ========");
                 log(request);
-
-                byte[] reqBytes = Latin1.GetBytes(request);
-                await stream.WriteAsync(reqBytes, ioCt).ConfigureAwait(false);
+                await stream.WriteAsync(Latin1.GetBytes(request), ioCt).ConfigureAwait(false);
                 await stream.FlushAsync(ioCt).ConfigureAwait(false);
-
-                // Bounded read: CopyToAsync would happily buffer a multi-gigabyte reply from a hostile or
-                // broken tracker. Stop at the cap and treat it as a failed announce instead.
-                using MemoryStream mem = new();
-                byte[] chunk = new byte[16 * 1024];
-                int got;
-                bool tooLarge = false;
-                while ((got = await stream.ReadAsync(chunk, ioCt).ConfigureAwait(false)) > 0)
-                {
-                    if (mem.Length + got > TrackerResponse.MaxBodyBytes)
-                    {
-                        tooLarge = true;
-                        break;
-                    }
-
-                    mem.Write(chunk, 0, got);
-                }
-
-                stream.Dispose();
-
-                if (tooLarge)
-                {
-                    log($"Error: tracker response exceeds {TrackerResponse.MaxBodyBytes / (1024 * 1024)} MB - ignored");
-                    return null;
-                }
-
-                if (mem.Length == 0)
-                {
-                    log("Error: tracker response is empty");
-                    return null;
-                }
-
-                TrackerResponse response = new(mem.ToArray());
+                TrackerResponse response = new(await HttpResponseReader.ReadAsync(stream, ioCt).ConfigureAwait(false), ioCt);
                 if (response.DoRedirect)
                 {
-                    // Resolve a RELATIVE Location (e.g. "/announce2?..." — legal per RFC 7231) against the
-                    // current request's origin; TryParseUrl requires a scheme, so a bare relative target
-                    // would otherwise be rejected and the announce would fail instead of following it.
-                    string loc = response.RedirectionUrl;
-                    if (loc.IndexOf("://", StringComparison.Ordinal) < 0)
-                    {
-                        string origin = $"{scheme}://{host}:{port}";
-                        loc = loc.StartsWith('/') ? origin + loc : origin + "/" + loc;
-                    }
-
-                    log("Redirecting to: " + loc);
-                    url = loc;
+                    if (redirect >= MaxRedirects) throw new IOException("Tracker exceeded the limit of five redirects.");
+                    string destination = ResolveRedirect(url, response.RedirectionUrl);
+                    if (!TryParseUrl(destination, out string nextScheme, out _, out _, out _))
+                        throw new IOException("Invalid tracker redirect destination.");
+                    if (https && nextScheme == "http")
+                        throw new IOException("Refusing an insecure HTTPS-to-HTTP tracker redirect.");
+                    log("Following tracker redirect.");
+                    url = destination;
                     continue;
                 }
-
                 log("======== Tracker Response ========");
                 log(response.Headers);
-
-                if (response.Oversized)
-                {
-                    // Name the real cause. Without this the announce just looks like a connection failure.
-                    log($"*** Tracker response inflates past {TrackerResponse.MaxBodyBytes / (1024 * 1024)} MB - refused");
-                    return null;
-                }
-
-                if (response.Dict == null)
-                {
-                    // Lead with the HTTP status when it is an error: a 5xx from a CDN in front of the
-                    // tracker (Cloudflare 520/521/522…) means the TRACKER's own server failed, which has
-                    // nothing to do with our connection — reporting it as "failed to decode" then
-                    // "no connection to tracker" sent users chasing their own network instead.
-                    if (response.StatusCode >= 400)
-                    {
-                        log($"*** Tracker returned HTTP {response.StatusCode} — the tracker's server refused or failed, not a local network problem.");
-                    }
-                    else
-                    {
-                        log("*** Failed to decode tracker response:");
-                    }
-
-                    // Truncate: an undecodable body can be megabytes of binary, and the log is built by
-                    // string concatenation on the UI thread before it is trimmed.
-                    log(response.Body.Length > 2000 ? response.Body[..2000] + "… (truncated)" : response.Body);
-                }
-
+                if (response.Oversized) log("*** Tracker response exceeds the 8 MiB decoded body limit.");
+                else if (response.StatusCode >= 400) log($"*** Tracker returned HTTP {response.StatusCode}.");
+                else if (response.Error is { Length: > 0 }) log("*** " + response.Error);
+                else if (response.Dict is null) log("*** Tracker response is not a complete bencoded dictionary.");
                 return response;
             }
-            catch (OperationCanceledException)
-            {
-                return null;
-            }
-            catch (Exception ex)
-            {
-                log("Exception: " + ex.Message);
-                return null;
-            }
-            finally
-            {
-                socket?.Dispose();
-            }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException ex)
+        {
+            throw new IOException("Tracker request timed out, including connection and redirect time.", ex);
+        }
+        catch (AuthenticationException ex)
+        {
+            throw new IOException("Tracker TLS authentication or certificate validation failed: " + ex.Message, ex);
+        }
+        catch (Exception ex) when (ex is SocketException or IOException or ArgumentException)
+        {
+            throw new IOException("Tracker request failed: " + ex.Message, ex);
+        }
+    }
 
-        log("Too many redirects");
-        return null;
+    private static string BuildRequest(string target, string authority, ClientProfile client)
+    {
+        if (client.HttpProtocol is not ("HTTP/1.0" or "HTTP/1.1"))
+            throw new IOException("Unsupported HTTP version in client profile.");
+        string headers = client.Headers.Replace("{host}", authority).TrimEnd('\r', '\n');
+        bool connection = false;
+        int hostCount = 0;
+        foreach (string line in headers.Split("\r\n", StringSplitOptions.None))
+        {
+            (string name, _) = HttpResponseReader.ParseField(line);
+            if (line.Any(c => c > 255)) throw new IOException("Client HTTP headers must contain Latin-1 characters.");
+            connection |= name.Equals("Connection", StringComparison.OrdinalIgnoreCase);
+            if (name.Equals("Host", StringComparison.OrdinalIgnoreCase)) hostCount++;
+            if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("A tracker GET profile cannot declare a request body.");
+        }
+        if (hostCount != 1) throw new IOException("Client HTTP profile must contain exactly one Host header.");
+        if (!connection) headers += "\r\nConnection: close";
+        return $"GET {EncodeTarget(target)} {client.HttpProtocol}\r\n{headers}\r\n\r\n";
     }
 
     private async Task<Socket> ConnectAsync(string host, int port, CancellationToken ct)
     {
-        if (proxy.Kind == ProxyKind.None)
-        {
-            // Dual-stack (InterNetworkV6 + DualMode) rather than IPv4-only: a tracker published solely on
-            // an AAAA record was previously unreachable, which is inconsistent now that we parse BEP 7
-            // IPv6 peer lists. DualMode still reaches IPv4 hosts via v4-mapped addresses.
-            Socket direct = new(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp)
-            {
-                DualMode = true,
-            };
-
-            try
-            {
-                await direct.ConnectAsync(host, port, ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                direct.Dispose(); // a failed/cancelled connect must not leak the Socket handle
-                throw;
-            }
-
-            return direct;
-        }
-
-        Socket socket = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        bool throughProxy = proxy.Kind != ProxyKind.None;
+        if (!Enum.IsDefined(proxy.Kind)) throw new IOException("Unknown proxy type.");
+        string firstHost = throughProxy ? proxy.Host.Trim().Trim('[', ']') : host;
+        int firstPort = throughProxy ? proxy.Port : port;
+        if (string.IsNullOrWhiteSpace(firstHost) || firstPort is < 1 or > 65535)
+            throw new IOException("Invalid proxy or tracker endpoint.");
+        Socket socket = await ConnectFirstHopAsync(firstHost, firstPort, ct).ConfigureAwait(false);
         try
         {
-            // The catch below now covers the initial connect too — a proxy that's down/refuses
-            // must not leak the Socket, and neither must a failure in the handshake.
-            await socket.ConnectAsync(proxy.Host, proxy.Port, ct).ConfigureAwait(false);
-            NetworkStream ns = new(socket, ownsSocket: false);
-            switch (proxy.Kind)
+            if (throughProxy)
             {
-                case ProxyKind.HttpConnect:
-                    await HttpConnectAsync(ns, host, port, ct).ConfigureAwait(false);
-                    break;
-                case ProxyKind.Socks4:
-                    await Socks4Async(ns, host, port, resolveRemotely: false, ct).ConfigureAwait(false);
-                    break;
-                case ProxyKind.Socks4a:
-                    await Socks4Async(ns, host, port, resolveRemotely: true, ct).ConfigureAwait(false);
-                    break;
-                case ProxyKind.Socks5:
-                    await Socks5Async(ns, host, port, ct).ConfigureAwait(false);
-                    break;
-            }
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
-
-        return socket;
-    }
-
-    private async Task HttpConnectAsync(NetworkStream ns, string host, int port, CancellationToken ct)
-    {
-        StringBuilder sb = new();
-        sb.Append($"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
-        if (proxy.User.Length > 0)
-        {
-            string token = Convert.ToBase64String(Encoding.UTF8.GetBytes(proxy.User + ":" + proxy.Password));
-            sb.Append("Proxy-Authorization: Basic ").Append(token).Append("\r\n");
-        }
-
-        sb.Append("\r\n");
-        byte[] req = Latin1.GetBytes(sb.ToString());
-        await ns.WriteAsync(req, ct).ConfigureAwait(false);
-
-        string response = await ReadLineHeadersAsync(ns, ct).ConfigureAwait(false);
-        if (!response.Contains(" 200"))
-        {
-            throw new IOException("HTTP proxy CONNECT failed: " + response.Split('\n')[0].Trim());
-        }
-    }
-
-    private async Task Socks4Async(NetworkStream ns, string host, int port, bool resolveRemotely, CancellationToken ct)
-    {
-        using MemoryStream req = new();
-        req.WriteByte(0x04); // version
-        req.WriteByte(0x01); // connect
-        req.WriteByte((byte)(port >> 8));
-        req.WriteByte((byte)(port & 0xFF));
-
-        byte[]? ipBytes = null;
-        if (!resolveRemotely)
-        {
-            System.Net.IPAddress[] addrs = await System.Net.Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
-            foreach (System.Net.IPAddress a in addrs)
-            {
-                if (a.AddressFamily == AddressFamily.InterNetwork)
+                using NetworkStream stream = new(socket, ownsSocket: false);
+                switch (proxy.Kind)
                 {
-                    ipBytes = a.GetAddressBytes();
-                    break;
+                    case ProxyKind.HttpConnect: await HttpConnectAsync(stream, host, port, ct).ConfigureAwait(false); break;
+                    case ProxyKind.Socks4: await Socks4Async(stream, host, port, false, ct).ConfigureAwait(false); break;
+                    case ProxyKind.Socks4a: await Socks4Async(stream, host, port, true, ct).ConfigureAwait(false); break;
+                    case ProxyKind.Socks5: await Socks5Async(stream, host, port, ct).ConfigureAwait(false); break;
                 }
             }
+            return socket;
         }
+        catch { socket.Dispose(); throw; }
+    }
 
-        if (ipBytes == null)
+    private async Task<Socket> ConnectFirstHopAsync(string host, int port, CancellationToken ct)
+    {
+        IPAddress[] addresses = IPAddress.TryParse(host, out IPAddress? literal)
+            ? [literal] : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        addresses = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork
+            || (Socket.OSSupportsIPv6 && a.AddressFamily == AddressFamily.InterNetworkV6)).Distinct().ToArray();
+        if (addresses.Length == 0) throw new IOException("No supported IP address was found for the connection endpoint.");
+        // The shared request deadline bounds DNS and every connection attempt together.
+        Exception? last = null;
+        for (int attempt = 0; attempt < MaxConnectAttempts; attempt++)
         {
-            // SOCKS4a: 0.0.0.x sentinel, hostname appended after the user id.
-            req.Write([0, 0, 0, 1], 0, 4);
+            ct.ThrowIfCancellationRequested();
+            IPAddress address = addresses[attempt % addresses.Length];
+            using CancellationTokenSource connectDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            connectDeadline.CancelAfter(TimeSpan.FromSeconds(5));
+            Socket socket = new(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, port), connectDeadline.Token).ConfigureAwait(false);
+                return socket;
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                socket.Dispose();
+                last = ex;
+            }
+            catch (SocketException ex) when (IsTransientConnectError(ex.SocketErrorCode))
+            {
+                socket.Dispose();
+                last = ex;
+            }
+            catch { socket.Dispose(); throw; }
+            if (attempt + 1 < MaxConnectAttempts) log($"Connection attempt {attempt + 1} failed; retrying the configured endpoint.");
+        }
+        throw new IOException($"Could not establish the configured connection after {MaxConnectAttempts} attempts.", last);
+    }
+
+    private static bool IsTransientConnectError(SocketError error) => error is
+        SocketError.ConnectionRefused or SocketError.ConnectionReset or SocketError.ConnectionAborted
+        or SocketError.TimedOut or SocketError.HostUnreachable or SocketError.NetworkUnreachable
+        or SocketError.NetworkDown or SocketError.TryAgain or SocketError.AddressNotAvailable;
+
+    private async Task HttpConnectAsync(Stream stream, string host, int port, CancellationToken ct)
+    {
+        string authority = Authority(host, port);
+        StringBuilder request = new($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+        if (proxy.User.Length > 0)
+        {
+            if (proxy.User.Contains(':')) throw new IOException("HTTP proxy username cannot contain a colon.");
+            string token = Convert.ToBase64String(Utf8.GetBytes(proxy.User + ":" + proxy.Password));
+            request.Append("Proxy-Authorization: Basic ").Append(token).Append("\r\n");
+        }
+        request.Append("\r\n");
+        if (request.Length > HttpResponseReader.MaxProxyHeaderBytes)
+            throw new IOException("HTTP proxy credentials exceed the request header limit.");
+        await stream.WriteAsync(Latin1.GetBytes(request.ToString()), ct).ConfigureAwait(false);
+        HttpResponseReader.Message response = await HttpResponseReader.ReadConnectHeadersAsync(stream, ct).ConfigureAwait(false);
+        if (response.StatusCode is < 200 or >= 300)
+            throw new IOException($"HTTP proxy CONNECT refused the tunnel (HTTP {response.StatusCode}).");
+    }
+
+    private async Task Socks4Async(Stream stream, string host, int port, bool remotely, CancellationToken ct)
+    {
+        bool literal = IPAddress.TryParse(host, out IPAddress? address);
+        bool domain = remotely && !literal;
+        if (!domain)
+        {
+            if (!literal)
+                address = (await Dns.GetHostAddressesAsync(host, AddressFamily.InterNetwork, ct).ConfigureAwait(false)).FirstOrDefault();
+            if (address is null || address.AddressFamily != AddressFamily.InterNetwork)
+                throw new IOException("SOCKS4 requires an IPv4 destination; use SOCKS5 for IPv6.");
+        }
+        byte[] user = Utf8.GetBytes(proxy.User);
+        if (user.Length > 255 || user.Contains((byte)0)) throw new IOException("Invalid or excessive SOCKS4 user ID.");
+        byte[] domainBytes = domain ? DomainBytes(host) : [];
+        using MemoryStream request = new();
+        request.Write([4, 1, (byte)(port >> 8), (byte)port]);
+        request.Write(domain ? [0, 0, 0, 1] : address!.GetAddressBytes());
+        request.Write(user);
+        request.WriteByte(0);
+        if (domain) { request.Write(domainBytes); request.WriteByte(0); }
+        await stream.WriteAsync(request.ToArray(), ct).ConfigureAwait(false);
+        byte[] response = new byte[8];
+        await stream.ReadExactlyAsync(response, ct).ConfigureAwait(false);
+        if (response[0] != 0 || response[1] != 0x5A)
+            throw new IOException($"Invalid or refused SOCKS4 response (version {response[0]}, status 0x{response[1]:X2}).");
+    }
+
+    private async Task Socks5Async(Stream stream, string host, int port, CancellationToken ct)
+    {
+        bool credentials = proxy.User.Length > 0;
+        byte[] user = credentials ? Utf8.GetBytes(proxy.User) : [];
+        byte[] password = credentials ? Utf8.GetBytes(proxy.Password) : [];
+        if (credentials && (user.Length is < 1 or > 255 || password.Length is < 1 or > 255))
+            throw new IOException("SOCKS5 username and password must each contain 1 to 255 UTF-8 bytes.");
+        await stream.WriteAsync(credentials ? new byte[] { 5, 2, 0, 2 } : [5, 1, 0], ct).ConfigureAwait(false);
+        byte[] method = new byte[2];
+        await stream.ReadExactlyAsync(method, ct).ConfigureAwait(false);
+        if (method[0] != 5 || (method[1] != 0 && !(method[1] == 2 && credentials)))
+            throw new IOException("SOCKS5 proxy selected an invalid or unoffered authentication method.");
+        if (method[1] == 2)
+        {
+            using MemoryStream authentication = new();
+            authentication.Write([1, (byte)user.Length]);
+            authentication.Write(user);
+            authentication.WriteByte((byte)password.Length);
+            authentication.Write(password);
+            await stream.WriteAsync(authentication.ToArray(), ct).ConfigureAwait(false);
+            byte[] result = new byte[2];
+            await stream.ReadExactlyAsync(result, ct).ConfigureAwait(false);
+            if (result[0] != 1 || result[1] != 0) throw new IOException("SOCKS5 authentication failed or returned an invalid version.");
+        }
+        using MemoryStream request = new();
+        request.Write([5, 1, 0]);
+        if (IPAddress.TryParse(host, out IPAddress? address))
+        {
+            if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+            request.WriteByte(address.AddressFamily == AddressFamily.InterNetwork ? (byte)1 : (byte)4);
+            request.Write(address.GetAddressBytes());
         }
         else
         {
-            req.Write(ipBytes, 0, 4);
+            byte[] domain = DomainBytes(host);
+            request.Write([3, (byte)domain.Length]);
+            request.Write(domain);
         }
-
-        byte[] user = Encoding.ASCII.GetBytes(proxy.User);
-        req.Write(user, 0, user.Length);
-        req.WriteByte(0x00);
-        if (ipBytes == null)
-        {
-            byte[] domain = Encoding.ASCII.GetBytes(host);
-            req.Write(domain, 0, domain.Length);
-            req.WriteByte(0x00);
-        }
-
-        byte[] reqArr = req.ToArray();
-        await ns.WriteAsync(reqArr, ct).ConfigureAwait(false);
-
-        byte[] resp = new byte[8];
-        await ReadExactAsync(ns, resp, ct).ConfigureAwait(false);
-        if (resp[1] != 0x5A)
-        {
-            throw new IOException("SOCKS4 proxy refused (code 0x" + resp[1].ToString("X2") + ")");
-        }
-    }
-
-    private async Task Socks5Async(NetworkStream ns, string host, int port, CancellationToken ct)
-    {
-        bool auth = proxy.User.Length > 0;
-        byte[] greeting = auth ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00];
-        await ns.WriteAsync(greeting, ct).ConfigureAwait(false);
-
-        byte[] methodResp = new byte[2];
-        await ReadExactAsync(ns, methodResp, ct).ConfigureAwait(false);
-        if (methodResp[1] == 0x02)
-        {
-            using MemoryStream a = new();
-            a.WriteByte(0x01);
-            byte[] u = Encoding.UTF8.GetBytes(proxy.User);
-            byte[] p = Encoding.UTF8.GetBytes(proxy.Password);
-            a.WriteByte((byte)u.Length);
-            a.Write(u, 0, u.Length);
-            a.WriteByte((byte)p.Length);
-            a.Write(p, 0, p.Length);
-            byte[] authArr = a.ToArray();
-            await ns.WriteAsync(authArr, ct).ConfigureAwait(false);
-
-            byte[] authResp = new byte[2];
-            await ReadExactAsync(ns, authResp, ct).ConfigureAwait(false);
-            if (authResp[1] != 0x00)
-            {
-                throw new IOException("SOCKS5 authentication failed");
-            }
-        }
-        else if (methodResp[1] != 0x00)
-        {
-            throw new IOException("SOCKS5 proxy rejected auth methods");
-        }
-
-        using MemoryStream req = new();
-        req.WriteByte(0x05);
-        req.WriteByte(0x01); // connect
-        req.WriteByte(0x00); // reserved
-        req.WriteByte(0x03); // domain name
-        byte[] domain = Encoding.ASCII.GetBytes(host);
-        req.WriteByte((byte)domain.Length);
-        req.Write(domain, 0, domain.Length);
-        req.WriteByte((byte)(port >> 8));
-        req.WriteByte((byte)(port & 0xFF));
-        byte[] reqArr = req.ToArray();
-        await ns.WriteAsync(reqArr, ct).ConfigureAwait(false);
-
+        request.Write([(byte)(port >> 8), (byte)port]);
+        await stream.WriteAsync(request.ToArray(), ct).ConfigureAwait(false);
         byte[] head = new byte[4];
-        await ReadExactAsync(ns, head, ct).ConfigureAwait(false);
-        if (head[1] != 0x00)
+        await stream.ReadExactlyAsync(head, ct).ConfigureAwait(false);
+        if (head[0] != 5 || head[2] != 0) throw new IOException("Invalid SOCKS5 CONNECT response version or reserved byte.");
+        if (head[1] != 0) throw new IOException($"SOCKS5 proxy refused the destination (status 0x{head[1]:X2}).");
+        int length = head[3] switch
         {
-            throw new IOException("SOCKS5 connect failed (code 0x" + head[1].ToString("X2") + ")");
-        }
-
-        int skip = head[3] switch
-        {
-            0x01 => 4,
-            0x04 => 16,
-            0x03 => 1, // followed by a length byte then that many
-            _ => 0,
+            1 => 4, 4 => 16, 3 => -1,
+            _ => throw new IOException("SOCKS5 proxy returned an unknown address type."),
         };
-
-        if (head[3] == 0x03)
+        if (length < 0)
         {
-            byte[] len = new byte[1];
-            await ReadExactAsync(ns, len, ct).ConfigureAwait(false);
-            skip = len[0];
+            byte[] count = new byte[1];
+            await stream.ReadExactlyAsync(count, ct).ConfigureAwait(false);
+            length = count[0];
+            if (length == 0) throw new IOException("SOCKS5 proxy returned an empty bound hostname.");
         }
-
-        byte[] rest = new byte[skip + 2]; // address remainder + port
-        await ReadExactAsync(ns, rest, ct).ConfigureAwait(false);
+        await stream.ReadExactlyAsync(new byte[length + 2], ct).ConfigureAwait(false);
     }
 
-    private static async Task<string> ReadLineHeadersAsync(NetworkStream ns, CancellationToken ct)
+    private static byte[] DomainBytes(string host)
     {
-        using MemoryStream ms = new();
-        byte[] one = new byte[1];
-        int crlfCount = 0;
-        while (crlfCount < 4)
-        {
-            int n = await ns.ReadAsync(one, ct).ConfigureAwait(false);
-            if (n == 0)
-            {
-                break;
-            }
-
-            ms.WriteByte(one[0]);
-            crlfCount = one[0] is (byte)'\r' or (byte)'\n' ? crlfCount + 1 : 0;
-        }
-
-        return Latin1.GetString(ms.ToArray());
+        string ascii = new IdnMapping().GetAscii(host);
+        byte[] bytes = Encoding.ASCII.GetBytes(ascii);
+        if (bytes.Length is < 1 or > 255 || ascii.Any(c => c <= 32 || c >= 127))
+            throw new IOException("SOCKS destination hostname must contain 1 to 255 ASCII bytes.");
+        return bytes;
     }
 
-    private static async Task ReadExactAsync(NetworkStream ns, byte[] buffer, CancellationToken ct)
-    {
-        int read = 0;
-        while (read < buffer.Length)
-        {
-            int n = await ns.ReadAsync(buffer.AsMemory(read), ct).ConfigureAwait(false);
-            if (n == 0)
-            {
-                throw new IOException("Proxy closed the connection unexpectedly");
-            }
+    private static string Authority(string host, int port, int defaultPort = -1) =>
+        (host.Contains(':') ? "[" + host + "]" : host) + (port == defaultPort ? string.Empty : ":" + port.ToString(CultureInfo.InvariantCulture));
 
-            read += n;
-        }
-    }
-
-    private static bool TryParseUrl(string url, out string scheme, out string host, out int port, out string pathAndQuery)
+    internal static bool TryParseUrl(string url, out string scheme, out string host, out int port, out string pathAndQuery)
     {
-        scheme = "http";
-        host = string.Empty;
-        port = 80;
+        scheme = host = string.Empty;
+        port = 0;
         pathAndQuery = "/";
-
-        int schemeIdx = url.IndexOf("://", StringComparison.Ordinal);
-        if (schemeIdx < 0)
+        if (url.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)) || url.Contains('\\')
+            || !Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) || parsed.Scheme is not ("http" or "https")
+            || parsed.UserInfo.Length > 0 || parsed.Port is < 1 or > 65535) return false;
+        scheme = parsed.Scheme;
+        host = parsed.IdnHost.Trim('[', ']');
+        port = parsed.Port;
+        int start = url.IndexOf("://", StringComparison.Ordinal);
+        if (start < 0) return false;
+        int end = url.IndexOfAny(['/', '?', '#'], start + 3);
+        if (end >= 0)
         {
-            return false;
+            pathAndQuery = StripFragment(url[end..]);
+            if (!pathAndQuery.StartsWith('/')) pathAndQuery = "/" + pathAndQuery;
         }
-
-        scheme = url.Substring(0, schemeIdx);
-        string rest = url.Substring(schemeIdx + 3);
-        int slash = rest.IndexOf('/');
-        string authority;
-        if (slash < 0)
-        {
-            authority = rest;
-            pathAndQuery = "/";
-        }
-        else
-        {
-            authority = rest.Substring(0, slash);
-            pathAndQuery = rest.Substring(slash);
-        }
-
-        port = scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? 443 : 80;
-        int colon = authority.LastIndexOf(':');
-        if (colon >= 0)
-        {
-            host = authority.Substring(0, colon);
-            if (int.TryParse(authority.Substring(colon + 1), out int p))
-            {
-                port = p;
-            }
-        }
-        else
-        {
-            host = authority;
-        }
-
         return host.Length > 0;
+    }
+
+    private static string EncodeTarget(string value)
+    {
+        StringBuilder encoded = new();
+        foreach (byte b in Utf8.GetBytes(value))
+        {
+            if (b >= 128) encoded.Append('%').Append(b.ToString("X2", CultureInfo.InvariantCulture));
+            else encoded.Append((char)b);
+        }
+        return encoded.ToString();
+    }
+
+    /// <summary>Resolves relative references without re-escaping percent sequences or reordering queries.</summary>
+    internal static string ResolveRedirect(string current, string location)
+    {
+        if (location.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)) || location.Contains('\\'))
+            throw new IOException("Invalid characters in tracker redirect.");
+        string reference = StripFragment(location);
+        if (Uri.TryCreate(reference, UriKind.Absolute, out Uri? absolute)
+            && absolute.Scheme is "http" or "https") return reference;
+        int schemeEnd = current.IndexOf("://", StringComparison.Ordinal);
+        if (reference.StartsWith("//", StringComparison.Ordinal)) return current[..(schemeEnd + 1)] + reference;
+        int authorityEnd = current.IndexOfAny(['/', '?', '#'], schemeEnd + 3);
+        string origin = authorityEnd < 0 ? current : current[..authorityEnd];
+        if (!TryParseUrl(current, out _, out _, out _, out string originalTarget)) throw new IOException("Invalid redirect base URL.");
+        if (reference.Length == 0) return origin + originalTarget;
+        int query = originalTarget.IndexOf('?');
+        string path = query < 0 ? originalTarget : originalTarget[..query];
+        if (reference[0] == '?') return origin + path + reference;
+        int colon = reference.IndexOf(':');
+        int slash = reference.IndexOfAny(['/', '?']);
+        if (colon >= 0 && (slash < 0 || colon < slash)) throw new IOException("Unsupported tracker redirect protocol.");
+        string target = reference[0] == '/' ? reference : path[..(path.LastIndexOf('/') + 1)] + reference;
+        query = target.IndexOf('?');
+        string suffix = query < 0 ? string.Empty : target[query..];
+        string targetPath = query < 0 ? target : target[..query];
+        List<string> segments = [];
+        string[] parts = targetPath.Split('/');
+        for (int i = 1; i < parts.Length; i++)
+        {
+            if (parts[i] == "..")
+            {
+                if (segments.Count > 0) segments.RemoveAt(segments.Count - 1);
+                if (i == parts.Length - 1) segments.Add(string.Empty);
+            }
+            else if (parts[i] == ".")
+            {
+                if (i == parts.Length - 1) segments.Add(string.Empty);
+            }
+            else segments.Add(parts[i]);
+        }
+        return origin + "/" + string.Join('/', segments) + suffix;
+    }
+
+    private static string StripFragment(string value)
+    {
+        int fragment = value.IndexOf('#');
+        return fragment < 0 ? value : value[..fragment];
     }
 }

@@ -25,6 +25,8 @@ public enum TabDotState
     /// <summary>Grey: idle.</summary>
     Idle,
 
+    Finished,
+
     /// <summary>Green: running normally.</summary>
     Running,
 

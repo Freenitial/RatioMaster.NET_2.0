@@ -2,75 +2,34 @@ namespace RatioMaster.Services;
 
 using System;
 using System.IO;
-using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
 
-/// <summary>
-/// Portable session persistence. Writes <c>ratiomaster.session</c> next to the exe when
-/// possible (portable), otherwise falls back to %TEMP%. AOT-safe (source-generated JSON).
-/// </summary>
+/// <summary>Portable desktop storage and app-private Android storage with atomic replacement.</summary>
 internal static class SessionStore
 {
     private const string FileName = "ratiomaster.session";
+    private static readonly SessionRepository Repository = CreateRepository();
+    internal static string SettingsDirectory => Path.GetDirectoryName(Repository.PrimaryPath)!;
+    internal static string? LoadWarning => Repository.LoadWarning;
 
-    private static string PrimaryPath => Path.Combine(AppContext.BaseDirectory, FileName);
-
-    private static string FallbackPath => Path.Combine(Path.GetTempPath(), FileName);
-
-    internal static void Save(SessionData data)
+    private static SessionRepository CreateRepository()
     {
-        string json = JsonSerializer.Serialize(data, AppJsonContext.Default.SessionData);
-        try
-        {
-            File.WriteAllText(PrimaryPath, json);
-        }
-        catch
-        {
-            try
-            {
-                File.WriteAllText(FallbackPath, json);
-            }
-            catch
-            {
-                // give up silently — persistence is best-effort
-            }
-        }
+        string privateRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RatioMaster");
+        if (OperatingSystem.IsAndroid())
+            return new SessionRepository(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), FileName));
+        if (OperatingSystem.IsMacOS())
+            return new SessionRepository(Path.Combine(privateRoot, FileName), migrationPath: Path.Combine(AppContext.BaseDirectory, FileName));
+        string location = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
+        string normalized = OperatingSystem.IsWindows() ? location.ToUpperInvariant() : location;
+        string identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..24];
+        return new SessionRepository(Path.Combine(location, FileName),
+            Path.Combine(privateRoot, "Portable", identity, FileName), Path.Combine(Path.GetTempPath(), FileName));
     }
 
-    internal static SessionData? Load()
-    {
-        foreach (string path in new[] { PrimaryPath, FallbackPath })
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    return JsonSerializer.Deserialize(File.ReadAllText(path), AppJsonContext.Default.SessionData);
-                }
-            }
-            catch
-            {
-                // corrupt / unreadable → ignore, try next
-            }
-        }
-
-        return null;
-    }
-
-    internal static void Delete()
-    {
-        foreach (string path in new[] { PrimaryPath, FallbackPath })
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-    }
+    internal static void Save(SessionData data) => Repository.Save(data);
+    internal static Task SaveAsync(SessionData data) => Repository.SaveAsync(data);
+    internal static SessionData? Load() => Repository.Load();
+    internal static SessionData Decode(string json) => SessionRepository.Decode(json);
 }

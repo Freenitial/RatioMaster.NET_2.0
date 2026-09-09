@@ -1,5 +1,4 @@
-// Android-only: keeps emulation sessions alive while the app is in the background. Compiled only for the
-// net11.0-android target (the ANDROID symbol), so this file is empty on every desktop build.
+// Android foreground-service integration, compiled only for the Android target.
 #if ANDROID
 using System;
 using Android.App;
@@ -11,16 +10,9 @@ using RatioMaster.Services;
 namespace RatioMaster;
 
 /// <summary>
-/// Foreground service with a persistent notification — the Android counterpart of minimising to the
-/// Windows tray. Without it, a backgrounded activity is a cached process: Doze and App Standby throttle
-/// its network and timers, and the system reclaims it under memory pressure, so a running session simply
-/// dies with no indication. A foreground service is the only supported way to keep working.
-///
-/// <para>The service type is <c>specialUse</c> rather than the more obvious <c>dataSync</c>: since
-/// Android 15, dataSync foreground services are capped at roughly 6 hours per day and then force-stopped,
-/// which is useless for a tool meant to seed for hours or days. specialUse has no such cap. (It does need
-/// a justification if the app is ever submitted to Google Play; that is not a concern for a sideloaded
-/// APK, and this app would not be Play-eligible anyway.)</para>
+/// Provides foreground-service status and an ongoing notification while sessions are active, including
+/// paused sessions. Android or the user can still stop the process. This service acquires no wake lock
+/// and does not exempt session work from device sleep or network restrictions.
 /// </summary>
 [Service(
     Exported = false,
@@ -32,13 +24,44 @@ internal sealed class RatioForegroundService : Service
 
     public override IBinder? OnBind(Intent? intent) => null;
 
+    public override void OnCreate()
+    {
+        base.OnCreate();
+        EnsureChannel(this);
+    }
+
     public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
     {
-        StartForeground(NotificationId, BuildNotification());
+        try
+        {
+            // Complete a pending foreground-start request even if its session has already stopped.
+            StartForeground(NotificationId, BuildNotification());
+        }
+        catch (Exception exception)
+        {
+            Android.Util.Log.Warn("RatioMaster", $"Unable to enter foreground-service mode: {exception}");
+            StopSessionService(startId);
+            return StartCommandResult.NotSticky;
+        }
 
-        // Sticky: if Android does reclaim us under extreme pressure, it recreates the service. The
-        // sessions themselves are restored from the persisted session file when the app comes back.
-        return StartCommandResult.Sticky;
+        if (!SessionActivity.IsActive)
+        {
+            StopSessionService(startId);
+        }
+
+        return StartCommandResult.NotSticky;
+    }
+
+    private void StopSessionService(int startId)
+    {
+        StopForeground(StopForegroundFlags.Remove);
+        StopSelf(startId);
+    }
+
+    public override void OnDestroy()
+    {
+        StopForeground(StopForegroundFlags.Remove);
+        base.OnDestroy();
     }
 
     internal static void EnsureChannel(Context context)
@@ -51,10 +74,10 @@ internal sealed class RatioForegroundService : Service
 
         NotificationChannel channel = new(
             ChannelId,
-            "Running sessions",
-            NotificationImportance.Low) // Low: persistent but silent — no sound or heads-up for a status line
+            "Active sessions",
+            NotificationImportance.Low)
         {
-            Description = "Shown while RatioMaster is emulating a torrent client in the background.",
+            Description = "Shown while RatioMaster sessions are running or paused.",
         };
 
         channel.SetShowBadge(false);
@@ -63,26 +86,24 @@ internal sealed class RatioForegroundService : Service
 
     private Notification BuildNotification()
     {
-        // Tapping the notification returns to the app rather than launching a second task.
+        // Reuse the activity in its existing task when the notification is opened.
         Intent open = new(this, typeof(MainActivity));
-        open.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop);
+        open.SetFlags(ActivityFlags.NewTask | ActivityFlags.SingleTop | ActivityFlags.ClearTop);
         PendingIntent? tap = PendingIntent.GetActivity(
             this, 0, open, PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
 
-        // Called as statements rather than chained: every NotificationCompat.Builder setter is bound as
-        // returning a NULLABLE builder, so a fluent chain trips the nullable analyser on each link. The
-        // setters mutate in place, so this is equivalent.
+        // Builder setters mutate in place and have nullable return annotations.
         NotificationCompat.Builder builder = new(this, ChannelId);
         builder.SetContentTitle("RatioMaster.NET");
-        builder.SetContentText("Session running — announcing to the tracker.");
+        builder.SetContentText("Sessions active (running or paused). Tap to open.");
         builder.SetSmallIcon(Resource.Mipmap.icon);
         builder.SetContentIntent(tap);
-        builder.SetOngoing(true); // not swipe-dismissible while the session runs
+        builder.SetOngoing(true);
+        builder.SetOnlyAlertOnce(true);
         builder.SetShowWhen(false);
         builder.SetPriority((int)NotificationPriority.Low);
 
-        // Bound as nullable, but Build() cannot return null for a builder with a channel and icon set —
-        // and StartForeground requires a real notification, so there is no useful fallback anyway.
+        // StartForeground requires a notification with a channel and a small icon.
         return builder.Build()!;
     }
 }
@@ -91,16 +112,33 @@ internal sealed class RatioForegroundService : Service
 /// edges, so the ViewModel layer stays platform-agnostic.</summary>
 internal static class ForegroundSessionBridge
 {
+    private static readonly object Sync = new();
     private static Context? app;
 
     internal static void Attach(Context context)
     {
-        app = context.ApplicationContext ?? context;
-        RatioForegroundService.EnsureChannel(app);
-        SessionActivity.ActiveChanged += OnActiveChanged;
+        lock (Sync)
+        {
+            if (app is null)
+            {
+                app = context.ApplicationContext ?? Android.App.Application.Context;
+                SessionActivity.ActiveChanged += OnActiveChanged;
+            }
+
+            SynchronizeService();
+        }
     }
 
-    private static void OnActiveChanged(bool active)
+    private static void OnActiveChanged(bool _)
+    {
+        lock (Sync)
+        {
+            SynchronizeService();
+        }
+    }
+
+    // Called under Sync: serialize service requests and read current state instead of a stale event value.
+    private static void SynchronizeService()
     {
         if (app is null)
         {
@@ -110,10 +148,9 @@ internal static class ForegroundSessionBridge
         try
         {
             Intent intent = new(app, typeof(RatioForegroundService));
-            if (active)
+            if (SessionActivity.IsActive)
             {
-                // API 26+ requires StartForegroundService when the app may already be backgrounded;
-                // the service then has a few seconds to call StartForeground, which it does immediately.
+                // Android can reject a foreground-service start when background-start restrictions apply.
                 if (OperatingSystem.IsAndroidVersionAtLeast(26))
                 {
                     app.StartForegroundService(intent);
@@ -128,10 +165,10 @@ internal static class ForegroundSessionBridge
                 app.StopService(intent);
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            // Never let a service-management failure break starting or stopping a session: the session is
-            // still valid in the foreground, it just loses its background guarantee.
+            // Service-management failures must not interrupt the session's own start or stop operation.
+            Android.Util.Log.Warn("RatioMaster", $"Unable to synchronize the session service: {exception}");
         }
     }
 }

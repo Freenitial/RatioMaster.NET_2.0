@@ -12,7 +12,10 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        AppLanguage.UseEnglishResources();
+        if (Array.IndexOf(args, "--runtime-selftest") >= 0) return RuntimeSelfTest.Run();
 #if DEBUG
+        if (Array.IndexOf(args, "--ui-selftest") >= 0) return UiSelfTest.Run();
         if (Array.IndexOf(args, "--selftest") >= 0)
         {
             return SelfTest.Run();

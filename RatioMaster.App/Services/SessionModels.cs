@@ -1,12 +1,50 @@
 namespace RatioMaster.Services;
 
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+
+internal enum CloseBehavior
+{
+    Ask,
+    Background,
+    Quit,
+}
 
 /// <summary>Persistable state of the whole app (portable settings + resume).</summary>
 internal sealed class SessionData
 {
+    public int FormatVersion { get; set; } = 2;
+
+    public WindowPlacement? Window { get; set; }
+
+    [JsonConverter(typeof(CloseBehaviorJsonConverter))]
+    public CloseBehavior CloseBehavior { get; set; } = CloseBehavior.Ask;
+
     public List<TabState> Tabs { get; set; } = [];
+}
+
+internal sealed class CloseBehaviorJsonConverter : JsonConverter<CloseBehavior>
+{
+    public override CloseBehavior Read(ref Utf8JsonReader reader, System.Type typeToConvert, JsonSerializerOptions options)
+    {
+        // An unrecognized preference must not prevent the tabs from being restored.
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return reader.GetString() switch
+            {
+                "Background" => CloseBehavior.Background,
+                "Quit" => CloseBehavior.Quit,
+                _ => CloseBehavior.Ask,
+            };
+        }
+
+        reader.Skip();
+        return CloseBehavior.Ask;
+    }
+
+    public override void Write(Utf8JsonWriter writer, CloseBehavior value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.ToString());
 }
 
 /// <summary>Everything one tab needs to be restored, including resume counters.</summary>
@@ -20,11 +58,16 @@ internal sealed class TabState
     // on Android, where TorrentFilePath holds only the display name). Empty when no torrent is loaded.
     public string TorrentSourcePath { get; set; } = string.Empty;
 
+    public string LastDirectory { get; set; } = string.Empty;
+
+    public string TorrentHash { get; set; } = string.Empty;
+
+    public string Tracker { get; set; } = string.Empty;
+
     public string UploadSpeed { get; set; } = "100";
 
-    // "Random" = smooth speed curve, per direction. Replaces the old RandUp/RandDown + min/max noise and
-    // the speed half of RealisticMode. Sessions written by an older build simply lack these keys and fall
-    // back to the defaults here (System.Text.Json ignores the removed keys they do carry).
+    // Smooth speed curves are configured independently for each direction.
+    // Missing JSON properties use these defaults; unmapped properties are ignored.
     public bool RandomUpload { get; set; } = true;
 
     public string DownloadSpeed { get; set; } = "0";
@@ -35,7 +78,7 @@ internal sealed class TabState
 
     public string Finished { get; set; } = "100";
 
-    public string StopWhen { get; set; } = "When uploaded >";
+    public string StopWhen { get; set; } = "When upload >";
 
     public string StopValue { get; set; } = "1000";
 
@@ -45,21 +88,21 @@ internal sealed class TabState
 
     public string CustomKey { get; set; } = string.Empty;
 
+    public bool? KeyIsGenerated { get; set; }
+
+    public bool? PeerIdIsGenerated { get; set; }
+
     public string CustomPeerId { get; set; } = string.Empty;
 
     public string CustomPort { get; set; } = string.Empty;
 
     public string CustomPeers { get; set; } = string.Empty;
 
-    public bool AlwaysNewValues { get; set; } = true;
-
     public bool RealisticMode { get; set; } = true;
 
     public bool UseTcpListener { get; set; } = true;
 
     public bool RequestScrape { get; set; } = true;
-
-    public bool IgnoreFailureReason { get; set; }
 
     public string ProxyType { get; set; } = "None";
 
@@ -71,22 +114,9 @@ internal sealed class TabState
 
     public string ProxyPort { get; set; } = string.Empty;
 
-    // "On next update": per-announce speed level, as a PERCENT of the configured MB/s (100 = as typed).
-    // Older sessions stored MB min/max under different names; those keys are simply ignored and these
-    // percent defaults apply.
-    public bool NextRandUp { get; set; }
-
-    public decimal NextRandUpMinPercent { get; set; } = 50;
-
-    public decimal NextRandUpMaxPercent { get; set; } = 150;
-
-    public bool NextRandDown { get; set; }
-
-    public decimal NextRandDownMinPercent { get; set; } = 50;
-
-    public decimal NextRandDownMaxPercent { get; set; } = 150;
-
     public bool EnableLog { get; set; } = true;
+
+    public bool FinishedSuccessfully { get; set; }
 
     // Resume counters (cumulative bytes at last save).
     public long Uploaded { get; set; }
@@ -94,7 +124,17 @@ internal sealed class TabState
     public long Downloaded { get; set; }
 }
 
-[JsonSourceGenerationOptions(WriteIndented = true)]
+internal sealed class WindowPlacement
+{
+    public int LayoutVersion { get; set; }
+    public int X { get; set; }
+    public int Y { get; set; }
+    public double Width { get; set; } = 1000;
+    public double Height { get; set; } = 668;
+    public bool Maximized { get; set; }
+}
+
+[JsonSourceGenerationOptions(WriteIndented = true, UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip)]
 [JsonSerializable(typeof(SessionData))]
 internal partial class AppJsonContext : JsonSerializerContext
 {

@@ -1,13 +1,18 @@
 using System;
+using System.Linq;
+using Avalonia.VisualTree;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Notifications;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using RatioMaster.Services;
+using RatioMaster.ViewModels;
 
 namespace RatioMaster.Views;
 
@@ -26,10 +31,18 @@ public partial class MainView : UserControl
     private ScrollViewer? tabScroll;
     private Button? tabLeftBtn;
     private Button? tabRightBtn;
-    private StackPanel? statsPanel;
+    private WrapPanel? statsPanel;
     private TextBlock? statusText;
     private Grid? scaledContent;
     private WindowNotificationManager? notifications;
+    private TaskCompletionSource<CloseDecision?>? closeDialog;
+    private IInputElement? focusBeforeCloseDialog;
+    private IInputElement? focusBeforeInfoOverlay;
+    private bool infoOverlayActive;
+    private MainWindowViewModel? observedMain;
+    private bool startupWarningShown;
+
+    internal readonly record struct CloseDecision(CloseBehavior Behavior, bool Remember);
 
     public MainView()
     {
@@ -39,7 +52,7 @@ public partial class MainView : UserControl
         tabScroll = this.FindControl<ScrollViewer>("TabScroll");
         tabLeftBtn = this.FindControl<Button>("TabLeftBtn");
         tabRightBtn = this.FindControl<Button>("TabRightBtn");
-        statsPanel = this.FindControl<StackPanel>("StatsPanel");
+        statsPanel = this.FindControl<WrapPanel>("StatsPanel");
         statusText = this.FindControl<TextBlock>("StatusTextBlock");
         if (tabScroll is not null)
         {
@@ -70,6 +83,182 @@ public partial class MainView : UserControl
         // notifications after the first detach/reattach.
         NotificationHub.Requested += OnNotification;
         Loaded += OnLoaded;
+        DataContextChanged += (_, _) =>
+        {
+            if (observedMain is not null) observedMain.PropertyChanged -= OnMainPropertyChanged;
+            observedMain = DataContext as MainWindowViewModel;
+            if (observedMain is not null) observedMain.PropertyChanged += OnMainPropertyChanged;
+        };
+        DetachedFromVisualTree += (_, _) => CancelCloseDialog();
+        AddHandler(KeyDownEvent, OnDialogKeyDown, RoutingStrategies.Tunnel);
+    }
+
+    internal Task<CloseDecision?> ShowCloseDialogAsync(bool canMinimizeToTray)
+    {
+        if (OperatingSystem.IsAndroid() || DataContext is not MainWindowViewModel { IsShuttingDown: false })
+        {
+            return Task.FromResult<CloseDecision?>(null);
+        }
+
+        if (closeDialog is not null)
+        {
+            return closeDialog.Task;
+        }
+
+        closeDialog = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        focusBeforeCloseDialog = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
+        this.FindControl<CheckBox>("RememberCloseSetting")!.IsChecked = false;
+        this.FindControl<Button>("BackgroundCloseButton")!.IsVisible = canMinimizeToTray;
+        this.FindControl<TextBlock>("TrayUnavailableText")!.IsVisible = !canMinimizeToTray;
+        this.FindControl<Grid>("MainContent")!.IsEnabled = false;
+        this.FindControl<Border>("CloseOverlay")!.IsVisible = true;
+        this.FindControl<Button>("CancelCloseButton")!.Focus();
+        return closeDialog.Task;
+    }
+
+    internal bool TryDismissDialog()
+    {
+        if (closeDialog is not null)
+        {
+            CancelCloseDialog();
+            return true;
+        }
+        if (DataContext is MainWindowViewModel { ChangelogOpen: true } changelog)
+        {
+            changelog.CloseChangelogCommand.Execute(null);
+            return true;
+        }
+        if (DataContext is MainWindowViewModel { AboutOpen: true } about)
+        {
+            about.CloseAboutCommand.Execute(null);
+            return true;
+        }
+
+        if (DataContext is MainWindowViewModel { SelectedTab: { ManualUpdatePending: true } tab })
+        {
+            tab.CancelManualUpdateCommand.Execute(null);
+            return true;
+        }
+
+        return this.GetVisualDescendants().OfType<RatioTabView>().Any(view => view.DismissSizeTip());
+    }
+
+    internal void CancelCloseDialog() => CompleteCloseDialog(null);
+
+    private async void OnOpenRelease(object? sender, RoutedEventArgs e) =>
+        await OpenLinkAsync((DataContext as MainWindowViewModel)?.ReleaseUri);
+    private async void OnOpenProject(object? sender, RoutedEventArgs e) =>
+        await OpenLinkAsync(new Uri("https://github.com/Freenitial/RatioMaster.NET_2.0"));
+    private async void OnReportBug(object? sender, RoutedEventArgs e) =>
+        await OpenLinkAsync(new Uri("https://github.com/Freenitial/RatioMaster.NET_2.0/issues/new"));
+
+    private async Task OpenLinkAsync(Uri? uri)
+    {
+        if (uri is null) return;
+        try
+        {
+            if (TopLevel.GetTopLevel(this) is { } top) await top.Launcher.LaunchUriAsync(uri);
+        }
+        catch (Exception ex) { NotificationHub.Show("Unable to open link", ex.Message, error: true); }
+    }
+
+    private void CompleteCloseDialog(CloseBehavior? behavior)
+    {
+        if (closeDialog is not { } pending)
+        {
+            return;
+        }
+
+        CloseDecision? decision = behavior is { } choice
+            ? new CloseDecision(choice, this.FindControl<CheckBox>("RememberCloseSetting")!.IsChecked == true)
+            : null;
+        closeDialog = null;
+        this.FindControl<Border>("CloseOverlay")!.IsVisible = false;
+        RefreshInteractionState();
+        focusBeforeCloseDialog?.Focus();
+        focusBeforeCloseDialog = null;
+        pending.TrySetResult(decision);
+    }
+
+    private void OnCancelClose(object? sender, RoutedEventArgs e) => CancelCloseDialog();
+
+    private void OnBackgroundClose(object? sender, RoutedEventArgs e) => CompleteCloseDialog(CloseBehavior.Background);
+
+    private void OnQuitClose(object? sender, RoutedEventArgs e) => CompleteCloseDialog(CloseBehavior.Quit);
+
+    private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainWindowViewModel.HasInfoOverlay)) return;
+        RefreshInteractionState();
+        bool open = observedMain?.HasInfoOverlay == true;
+        if (open && !infoOverlayActive) focusBeforeInfoOverlay = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
+        infoOverlayActive = open;
+        if (open)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (closeDialog is not null || observedMain?.HasInfoOverlay != true) return;
+                this.FindControl<Button>(observedMain.ChangelogOpen ? "ChangelogBackButton" : "AboutCloseButton")?.Focus();
+            }, DispatcherPriority.Input);
+        }
+        else
+        {
+            focusBeforeInfoOverlay?.Focus();
+            focusBeforeInfoOverlay = null;
+        }
+    }
+
+    private void RefreshInteractionState() => this.FindControl<Grid>("MainContent")!.IsEnabled = closeDialog is null && observedMain?.HasInfoOverlay != true;
+
+    private async void OnDialogKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && TryDismissDialog())
+        {
+            e.Handled = true;
+            return;
+        }
+        if (DataContext is not MainWindowViewModel { IsShuttingDown: false, HasInfoOverlay: false } vm
+            || closeDialog is not null || vm.SelectedTab is not { ManualUpdatePending: false } tab) return;
+        bool control = e.KeyModifiers == KeyModifiers.Control;
+        try
+        {
+            if (e.Key == Key.F5 && e.KeyModifiers == KeyModifiers.None && tab.ManualUpdateCommand.CanExecute(null))
+            {
+                e.Handled = true;
+                tab.ManualUpdateCommand.Execute(null);
+            }
+            else if (control && e.Key == Key.O && tab.InputsEnabled)
+            {
+                e.Handled = true;
+                if (this.GetVisualDescendants().OfType<RatioTabView>().FirstOrDefault() is { } view) await view.BrowseAsync();
+            }
+            else if (control && e.Key == Key.T)
+            {
+                e.Handled = true;
+                vm.AddTabCommand.Execute(null);
+            }
+            else if (control && e.Key == Key.W)
+            {
+                e.Handled = true;
+                await vm.CloseTabCommand.ExecuteAsync(tab);
+            }
+            else if (control && e.Key == Key.Enter && tab.StartCommand.CanExecute(null))
+            {
+                e.Handled = true;
+                await tab.StartCommand.ExecuteAsync(null);
+            }
+            else if (control && e.Key == Key.OemPeriod && tab.StopCommand.CanExecute(null))
+            {
+                e.Handled = true;
+                await tab.StopCommand.ExecuteAsync(null);
+            }
+            else if (e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift) && e.Key == Key.C)
+            {
+                e.Handled = true;
+                if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(tab.HashHex);
+            }
+        }
+        catch (Exception ex) { NotificationHub.Show("Unable to complete action", ex.Message, error: true); }
     }
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
@@ -85,16 +274,20 @@ public partial class MainView : UserControl
             };
         }
 
+        if (!startupWarningShown && DataContext is MainWindowViewModel { StartupWarning: { Length: > 0 } warning })
+        {
+            startupWarningShown = true;
+            NotificationHub.Show("Saved settings", warning);
+        }
         UpdateTabArrows();
         UpdateStatusBarDensity();
-        Relayout(); // TopLevel is attached now → RenderScaling is valid for the DIP conversion
+        Relayout(); // RenderScaling is available while the TopLevel is attached.
     }
 
     /// <summary>
-    /// Android: fit the ×1.25-scaled UI exactly inside the REAL safe area. We own the insets ourselves
-    /// (<c>TopLevel.AutoSafeAreaPadding=False</c> in XAML + the AndroidX listener feeding
-    /// <see cref="MobileInsets"/>) — Avalonia's built-in auto safe-area was double-stacking with ours and
-    /// leaving the big empty strip at the top. No-op on desktop (gated + insets are zero there anyway).
+    /// Fit the scaled Android UI inside the safe area supplied by <see cref="MobileInsets"/>.
+    /// TopLevel.AutoSafeAreaPadding is disabled so only this layout applies the insets.
+    /// Desktop content uses the unscaled layout.
     /// </summary>
     private void Relayout()
     {
@@ -200,7 +393,7 @@ public partial class MainView : UserControl
         double t = Math.Clamp((w - 540) / (980 - 540), 0, 1);
         if (statsPanel is not null)
         {
-            statsPanel.Spacing = Math.Round(3 + t * (24 - 3));
+            statsPanel.ItemSpacing = Math.Round(6 + t * (24 - 6));
         }
 
         if (statusText is not null)

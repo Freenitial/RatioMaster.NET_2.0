@@ -58,7 +58,7 @@ public static class FieldValidation
             valid = rule switch
             {
                 NumericRule.Int => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int i) && i >= 0,
-                NumericRule.Double => double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && d >= 0,
+                NumericRule.Double => double.TryParse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && double.IsFinite(d) && d >= 0,
                 _ => true,
             };
         }

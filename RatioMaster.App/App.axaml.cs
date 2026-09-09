@@ -1,10 +1,12 @@
 using System;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using CommunityToolkit.Mvvm.Input;
 using RatioMaster.Services;
 using RatioMaster.ViewModels;
 using RatioMaster.Views;
@@ -13,14 +15,27 @@ namespace RatioMaster;
 
 public partial class App : Application
 {
+    private MainWindowViewModel? desktopViewModel;
+    private MainWindow? mainWindow;
+    private TrayIcon? trayIcon;
+    private Task? shutdownTask;
+    private bool closeDecisionPending;
+
+    internal bool DesktopShutdownAllowed { get; private set; }
+
     /// <summary>
-    /// Persists the active session on a single-view (Android) host, which fires no ShutdownRequested /
-    /// window-Closing event. <c>MainActivity.OnPause</c> invokes this when the app is backgrounded.
-    /// Null on desktop (which saves via ShutdownRequested + MainWindow.Closing instead).
+    /// Persists the session on a single-view host when MainActivity.OnPause backgrounds the app.
+    /// Desktop hosts persist through the centralized shutdown flow.
     /// </summary>
     internal static Action? PersistSession { get; private set; }
 
-    public override void Initialize() => AvaloniaXamlLoader.Load(this);
+    internal static Func<bool>? TryDismissDialog { get; private set; }
+
+    public override void Initialize()
+    {
+        AppLanguage.UseEnglishResources();
+        AvaloniaXamlLoader.Load(this);
+    }
 
     public override void OnFrameworkInitializationCompleted()
     {
@@ -28,42 +43,171 @@ public partial class App : Application
         {
             MainWindowViewModel vm = new();
             MainWindow window = new() { DataContext = vm };
+            desktopViewModel = vm;
+            mainWindow = window;
             desktop.MainWindow = window;
-            desktop.ShutdownRequested += (_, _) =>
-            {
-                // Stop BEFORE saving: each engine sends its &event=stopped announce and finalises its
-                // counters, so the tracker does not keep a phantom peer and the saved totals are final.
-                vm.StopAll();
-                vm.SaveSession();
-            };
+            desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            desktop.ShutdownRequested += OnDesktopShutdownRequested;
 
-            // A second launch signals us instead of starting its own process (see SingleInstance): surface
-            // the window, which is normally hidden in the tray. The listener runs on a background thread.
+            if (window.Content is MainView view)
+            {
+                TryDismissDialog = view.TryDismissDialog;
+            }
+
+            // The single-instance listener dispatches window activation onto the UI thread.
             SingleInstance.StartListener(() => Dispatcher.UIThread.Post(() => ShowWindow(window)));
             try
             {
-                SetupTray(desktop, window, vm); // tray backend may be absent on some Linux DEs
+                SetupTray(window, vm);
             }
             catch
             {
-                // no tray → the app still runs normally
+                trayIcon?.Dispose();
+                trayIcon = null;
             }
         }
         else if (ApplicationLifetime is ISingleViewApplicationLifetime singleView)
         {
-            // Android (and any single-view host): no Window/tray — the shared MainView IS the app.
             MainWindowViewModel vm = new();
-            singleView.MainView = new MainView { DataContext = vm };
+            MainView view = new() { DataContext = vm };
+            singleView.MainView = view;
 
-            // Single-view hosts raise no ShutdownRequested/Closing, so wire a background-save hook that
-            // MainActivity.OnPause calls — otherwise the session would never be persisted on Android.
             PersistSession = vm.SaveSession;
+            TryDismissDialog = view.TryDismissDialog;
         }
 
         base.OnFrameworkInitializationCompleted();
     }
 
-    private void SetupTray(IClassicDesktopStyleApplicationLifetime desktop, MainWindow window, MainWindowViewModel vm)
+    private bool CanMinimizeToTray =>
+        trayIcon is { IsVisible: true, NativeMenuExporter: not null };
+
+    internal async Task RequestDesktopCloseAsync()
+    {
+        Dispatcher.UIThread.VerifyAccess();
+        if (closeDecisionPending || shutdownTask is not null
+            || desktopViewModel is not { } vm || mainWindow is not { } window)
+        {
+            return;
+        }
+
+        closeDecisionPending = true;
+        try
+        {
+            if (!OperatingSystem.IsWindows() || !vm.HasActiveSessions)
+            {
+                await ShutdownDesktopAsync();
+                return;
+            }
+
+            CloseBehavior behavior = vm.CloseBehavior;
+            bool remember = false;
+            if (behavior == CloseBehavior.Ask || (behavior == CloseBehavior.Background && !CanMinimizeToTray))
+            {
+                ShowWindow(window);
+                if (window.Content is not MainView view)
+                {
+                    return;
+                }
+
+                MainView.CloseDecision? decision = await view.ShowCloseDialogAsync(CanMinimizeToTray);
+                if (decision is null || shutdownTask is not null)
+                {
+                    return;
+                }
+
+                behavior = decision.Value.Behavior;
+                remember = decision.Value.Remember;
+            }
+
+            if (behavior == CloseBehavior.Background)
+            {
+                // Check again when applying a decision so a missing tray cannot strand a hidden window.
+                if (!CanMinimizeToTray)
+                {
+                    ShowWindow(window);
+                    NotificationHub.Show("Tray unavailable", "Keep this window open to access your sessions.");
+                    return;
+                }
+
+                if (remember)
+                {
+                    vm.CloseBehavior = behavior;
+                }
+
+                vm.SaveSession();
+                window.Hide();
+            }
+            else if (behavior == CloseBehavior.Quit)
+            {
+                if (remember)
+                {
+                    vm.CloseBehavior = behavior;
+                }
+
+                await ShutdownDesktopAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowWindow(window);
+            NotificationHub.Show("Unable to close", ex.Message, error: true);
+        }
+        finally
+        {
+            closeDecisionPending = false;
+        }
+    }
+
+    private void OnDesktopShutdownRequested(object? sender, ShutdownRequestedEventArgs e)
+    {
+        if (DesktopShutdownAllowed)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        _ = ShutdownDesktopAsync();
+    }
+
+    internal Task ShutdownDesktopAsync()
+    {
+        Dispatcher.UIThread.VerifyAccess();
+        if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime desktop
+            || desktopViewModel is not { } vm || mainWindow is not { } window)
+        {
+            return Task.CompletedTask;
+        }
+
+        return shutdownTask ??= ShutdownDesktopCoreAsync(desktop, window, vm);
+    }
+
+    private async Task ShutdownDesktopCoreAsync(
+        IClassicDesktopStyleApplicationLifetime desktop, MainWindow window, MainWindowViewModel vm)
+    {
+        // Leave the Closing/ShutdownRequested event stack before issuing the final Shutdown.
+        // This also installs the shared task before any property notifications can request another exit.
+        await Task.Yield();
+        try
+        {
+            vm.IsShuttingDown = true;
+            (window.Content as MainView)?.CancelCloseDialog();
+            await vm.StopAllAsync();
+            vm.SaveSession();
+            DesktopShutdownAllowed = true;
+            desktop.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            DesktopShutdownAllowed = false;
+            vm.IsShuttingDown = false;
+            shutdownTask = null;
+            ShowWindow(window);
+            NotificationHub.Show("Unable to quit", ex.Message, error: true);
+        }
+    }
+
+    private void SetupTray(MainWindow window, MainWindowViewModel vm)
     {
         WindowIcon icon;
         try
@@ -77,17 +221,12 @@ public partial class App : Application
 
         NativeMenuItem show = new() { Header = "Show" };
         show.Click += (_, _) => ShowWindow(window);
-        NativeMenuItem start = new() { Header = "Start current tab" };
-        start.Click += (_, _) => vm.SelectedTab?.StartCommand.Execute(null);
+        NativeMenuItem start = new() { Header = "Start / pause / resume current tab" };
+        start.Click += (_, _) => _ = ExecuteTrayCommandAsync(vm.SelectedTab?.StartCommand);
         NativeMenuItem stop = new() { Header = "Stop current tab" };
-        stop.Click += (_, _) => vm.SelectedTab?.StopCommand.Execute(null);
+        stop.Click += (_, _) => _ = ExecuteTrayCommandAsync(vm.SelectedTab?.StopCommand);
         NativeMenuItem exit = new() { Header = "Exit" };
-        exit.Click += (_, _) =>
-        {
-            vm.StopAll();
-            vm.SaveSession();
-            desktop.Shutdown();
-        };
+        exit.Click += (_, _) => _ = ShutdownDesktopAsync();
 
         NativeMenu menu = [];
         menu.Items.Add(show);
@@ -97,22 +236,56 @@ public partial class App : Application
         menu.Items.Add(new NativeMenuItemSeparator());
         menu.Items.Add(exit);
 
-        TrayIcon tray = new()
+        trayIcon = new TrayIcon();
+        trayIcon.Icon = icon;
+        trayIcon.ToolTipText = "RatioMaster.NET";
+        vm.PropertyChanged += (_, e) =>
         {
-            Icon = icon,
-            ToolTipText = "RatioMaster.NET",
-            Menu = menu,
-            IsVisible = true,
+            if (e.PropertyName == nameof(MainWindowViewModel.HasActiveSessions) && trayIcon is { } tray)
+            {
+                int active = vm.Tabs.Count(tab => tab.IsRunning || tab.IsTransitioning);
+                tray.ToolTipText = $"RatioMaster.NET — {active} active / {vm.Tabs.Count} tabs";
+            }
         };
-        tray.Clicked += (_, _) => ShowWindow(window);
+        trayIcon.Menu = menu;
+        trayIcon.IsVisible = true;
+        if (trayIcon.NativeMenuExporter is null)
+        {
+            trayIcon.Dispose();
+            trayIcon = null;
+            return;
+        }
 
-        TrayIcon.SetIcons(this, [tray]);
+        trayIcon.Clicked += (_, _) => ShowWindow(window);
+        TrayIcon.SetIcons(this, [trayIcon]);
     }
 
-    private static void ShowWindow(Window window)
+    private async Task ExecuteTrayCommandAsync(IAsyncRelayCommand? command)
     {
+        if (shutdownTask is not null || command?.CanExecute(null) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await command.ExecuteAsync(null);
+        }
+        catch (Exception ex)
+        {
+            NotificationHub.Show("Session action failed", ex.Message, error: true);
+        }
+    }
+
+    private void ShowWindow(Window window)
+    {
+        if (DesktopShutdownAllowed)
+        {
+            return;
+        }
+
         window.Show();
-        window.WindowState = WindowState.Normal;
+        if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
         window.Activate();
     }
 }

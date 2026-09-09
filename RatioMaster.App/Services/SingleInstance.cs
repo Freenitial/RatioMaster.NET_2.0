@@ -38,9 +38,7 @@ internal static class SingleInstance
         }
         catch
         {
-            // Named mutexes can be unavailable (locked-down or exotic platform). Never block the user from
-            // starting the app just because we couldn't arbitrate — degrade to the old multi-instance
-            // behaviour rather than refusing to launch.
+            // Platforms without named mutex support allow startup without instance coordination.
             return true;
         }
     }

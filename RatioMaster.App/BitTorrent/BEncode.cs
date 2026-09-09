@@ -62,10 +62,7 @@ internal sealed class ValueList : IBEncodeValue, IEnumerable
 
 internal sealed class ValueString : IBEncodeValue
 {
-    // Latin1 is a lossless 1:1 byte <-> codepoint map for 0..255, so every binary
-    // payload (info_hash, pieces, compact peers) round-trips byte-exact and the
-    // char length always equals the byte length. The original used Windows-1252,
-    // whose undefined slots (0x81, 0x8D, 0x8F, 0x90, 0x9D) corrupted binary data.
+    // Latin-1 maps each byte to one character, preserving binary bencode payloads.
     private static readonly Encoding Enc = Encoding.Latin1;
 
     private string v = string.Empty;
@@ -105,20 +102,17 @@ internal sealed class ValueString : IBEncodeValue
 
     public void Parse(Stream s, byte firstByte)
     {
-        string q = ((char)firstByte).ToString();
-        if (!char.IsNumber(q[0]))
+        if (firstByte < (byte)'0' || firstByte > (byte)'9') throw new TorrentException("Invalid string length.");
+        int length = firstByte - '0';
+        byte current;
+        while ((current = BEncode.ReadByteChecked(s)) != (byte)':')
         {
-            throw new TorrentException("\"" + q + "\" is not a string length number.");
+            if (current < (byte)'0' || current > (byte)'9' || length > BEncode.MaxStringBytes / 10)
+                throw new TorrentException("Invalid or excessive string length.");
+            length = checked(length * 10 + current - '0');
         }
-
-        char current = (char)BEncode.ReadByteChecked(s);
-        while (current != ':')
-        {
-            q += current.ToString();
-            current = (char)BEncode.ReadByteChecked(s);
-        }
-
-        int length = int.Parse(q);
+        if (length > BEncode.MaxStringBytes || (s.CanSeek && length > s.Length - s.Position))
+            throw new TorrentException("Truncated or excessive bencoded string.");
         data = new byte[length];
         ReadExact(s, data, length);
         v = Enc.GetString(data);
@@ -130,10 +124,7 @@ internal sealed class ValueString : IBEncodeValue
         while (read < length)
         {
             int n = s.Read(buffer, read, length - read);
-            if (n <= 0)
-            {
-                break;
-            }
+            if (n <= 0) throw new IncompleteTorrentData("Truncated bencoded string.");
 
             read += n;
         }
@@ -184,6 +175,8 @@ internal sealed class ValueNumber : IBEncodeValue
         char current = (char)BEncode.ReadByteChecked(s);
         while (current != 'e')
         {
+            if (buffer.Length >= 20 || (current != '-' && (current < '0' || current > '9')))
+                throw new TorrentException("Invalid bencoded integer.");
             buffer += current.ToString();
             current = (char)BEncode.ReadByteChecked(s);
         }
@@ -194,6 +187,8 @@ internal sealed class ValueNumber : IBEncodeValue
 
 internal static class BEncode
 {
+    internal const int MaxStringBytes = 8 * 1024 * 1024;
+    [ThreadStatic] private static int nesting;
     // Read one byte or throw on end-of-stream. Stream.ReadByte() returns -1 at EOF; casting that
     // straight to char yields U+FFFF (and to byte yields 255), neither of which matches a bencode
     // terminator ('e' / ':') — so a truncated payload would otherwise spin the parse loops forever,
@@ -220,24 +215,29 @@ internal static class BEncode
 
     internal static IBEncodeValue Parse(Stream d, byte firstByte)
     {
-        char first = (char)firstByte;
-        IBEncodeValue v = first switch
+        if (++nesting > 64) { nesting--; throw new TorrentException("Bencoded data is nested too deeply."); }
+        try
         {
-            'd' => new ValueDictionary(),
-            'l' => new ValueList(),
-            'i' => new ValueNumber(),
-            _ => new ValueString(),
-        };
+            char first = (char)firstByte;
+            IBEncodeValue v = first switch
+            {
+                'd' => new ValueDictionary(),
+                'l' => new ValueList(),
+                'i' => new ValueNumber(),
+                _ => new ValueString(),
+            };
 
-        if (v is ValueString vs)
-        {
-            vs.Parse(d, (byte)first);
-        }
-        else
-        {
-            v.Parse(d);
-        }
+            if (v is ValueString vs)
+            {
+                vs.Parse(d, (byte)first);
+            }
+            else
+            {
+                v.Parse(d);
+            }
 
-        return v;
+            return v;
+        }
+        finally { nesting--; }
     }
 }

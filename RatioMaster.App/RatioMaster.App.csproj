@@ -12,9 +12,9 @@
     <DesktopRid Condition="'$(DesktopRid)' == ''">win-x64</DesktopRid>
     <IsWindowsBuild Condition="$(DesktopRid.StartsWith('win'))">true</IsWindowsBuild>
     <IsWindowsBuild Condition="!$(DesktopRid.StartsWith('win'))">false</IsWindowsBuild>
-    <!-- Static Skia/HarfBuzz single-file is win-x64 only (the static .lib package ships win-x64 libs). -->
-    <UseStaticSkia Condition="'$(DesktopRid)' == 'win-x64'">true</UseStaticSkia>
-    <UseStaticSkia Condition="'$(DesktopRid)' != 'win-x64'">false</UseStaticSkia>
+    <!-- Windows desktop profiles link architecture-specific Skia and HarfBuzz static libraries. -->
+    <UseStaticSkia Condition="'$(DesktopRid)' == 'win-x64' OR '$(DesktopRid)' == 'win-arm64'">true</UseStaticSkia>
+    <UseStaticSkia Condition="'$(DesktopRid)' != 'win-x64' AND '$(DesktopRid)' != 'win-arm64'">false</UseStaticSkia>
 
     <!-- ANDROID head. `-p:IncludeAndroid=true` (set ONLY by build_RatioMaster_setup.bat's apk/aab
          phase) flips this project to net11.0-android and turns EVERY desktop-only switch OFF (no RID,
@@ -50,7 +50,7 @@
     <NoWarn>$(NoWarn);NETSDK1206</NoWarn>
     <IsAotCompatible>true</IsAotCompatible>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <Version>2.0.1</Version>
+    <Version>2.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -67,8 +67,8 @@
   <PropertyGroup Condition="'$(IncludeAndroid)' == 'true'">
     <Nullable>enable</Nullable>
     <ApplicationId>net.ratiomaster.app</ApplicationId>
-    <ApplicationVersion>2</ApplicationVersion>
-    <ApplicationDisplayVersion>2.0.1</ApplicationDisplayVersion>
+    <ApplicationVersion>20100</ApplicationVersion>
+    <ApplicationDisplayVersion>2.1.0</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidManifest>Properties\AndroidManifest.xml</AndroidManifest>
@@ -100,14 +100,14 @@
     <NoWarn>$(NoWarn);IL3053</NoWarn>
   </PropertyGroup>
 
-  <!-- win-x64 ONLY: statically link Skia + HarfBuzz into the exe for a true single file. -->
+  <!-- Native AOT and static graphics produce one Windows executable without library extraction. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release' AND '$(UseStaticSkia)' == 'true'">
     <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
     <StaticExecutable>true</StaticExecutable>
   </PropertyGroup>
 
-  <!-- Emit direct calls to the static Skia/HarfBuzz symbols + the system .lib files the link needs. -->
-  <ItemGroup Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true'">
+  <!-- The x64 package supplies archives; its direct calls and Windows libraries are declared here. -->
+  <ItemGroup Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-x64'">
     <DirectPInvoke Include="libHarfBuzzSharp" />
     <DirectPInvoke Include="libSkiaSharp" />
     <LinkerArg Include="Gdi32.lib;User32.lib" />
@@ -118,6 +118,11 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
+    <EmbeddedResource Include="..\CHANGELOG.md" LogicalName="RatioMaster.CHANGELOG.md" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Debug' AND '$(IncludeAndroid)' != 'true'">
+    <Compile Include="..\Tests\**\*.cs" Link="Tests\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- Android-only: the Android windowing backend, drop the SDK's implicit Android.App/Android.Widget
@@ -128,6 +133,10 @@
     <Using Remove="Android.App" />
     <Using Remove="Android.Widget" />
     <Compile Remove="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Debug' AND '$(IncludeAndroid)' != 'true'">
+    <PackageReference Include="Avalonia.Headless" Version="12.0.5" />
   </ItemGroup>
 
   <ItemGroup>
@@ -142,18 +151,34 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.0.5" />
   </ItemGroup>
 
-  <!-- Static .lib for Skia + HarfBuzz — win-x64 only. Everywhere else Avalonia's normal native
-       assets (libSkiaSharp.so / .dylib / .dll) flow transitively and ship alongside the binary. -->
-  <ItemGroup Condition="'$(UseStaticSkia)' == 'true'">
+  <!-- Static graphics providers are selected per Windows architecture. -->
+  <ItemGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-x64'">
     <PackageReference Include="2ndLAB.SkiaSharp.Static" Version="3.119.0-10.0.26100.0-1.1c7d845" />
   </ItemGroup>
 
-  <!-- Publish cleanup: always drop link-time .pdb/.lib. ANGLE (av_libglesv2.dll) is dropped on EVERY
-       Windows build (x64 AND arm64) because Program.cs forces the software renderer on all Windows
-       (Win32RenderingMode.Software, gated on OperatingSystem.IsWindows) so GLES is never loaded — it was
-       5 MB of dead weight in the arm64 .zip. The Skia/HarfBuzz DLLs are dropped ONLY on the win-x64 static
-       build (they're linked into the exe there); the multi-file arm64/linux builds keep them because they
-       load Skia as a real native library. Never runs for Android. -->
+  <PropertyGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+    <OptrisStaticGraphicsRequiredBackends>Software</OptrisStaticGraphicsRequiredBackends>
+    <OptrisStaticGraphicsAcknowledgeReducedTier>true</OptrisStaticGraphicsAcknowledgeReducedTier>
+    <!-- Program configures Software explicitly; no reflection-based rendering guard is compiled. -->
+    <OptrisStaticGraphicsInjectRuntimeGuard>false</OptrisStaticGraphicsInjectRuntimeGuard>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+    <PackageReference Include="Optris.StaticGraphics.Avalonia.Software" Version="3.119.4.1" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <Target Name="ValidateWindowsArm64StaticGraphics" BeforeTargets="LinkNative"
+          Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+    <PropertyGroup>
+      <_Arm64StaticGraphicsRoot>$(PkgOptris_StaticGraphics_Avalonia_Software)/static/win-arm64/native</_Arm64StaticGraphicsRoot>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/skia.lib')" Text="Windows ARM64 static graphics archive is missing: skia.lib. Restore the configured graphics package." />
+    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/SkiaSharp.lib')" Text="Windows ARM64 static graphics archive is missing: SkiaSharp.lib. Restore the configured graphics package." />
+    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/libHarfBuzzSharp.lib')" Text="Windows ARM64 static graphics archive is missing: libHarfBuzzSharp.lib. Restore the configured graphics package." />
+    <Error Condition="'$(OptrisStaticGraphicsTier)' != 'Software'" Text="Windows ARM64 requires the Software static graphics tier configured by Program." />
+  </Target>
+
+  <!-- Link-time artifacts are excluded from desktop distributions. Windows uses static graphics
+       and software rendering; Linux and macOS retain their dynamic graphics libraries. -->
   <Target Name="StripPublishExtras" AfterTargets="Publish" Condition="'$(Configuration)' == 'Release' AND '$(IncludeAndroid)' != 'true'">
     <ItemGroup>
       <_Extra Include="$(PublishDir)*.pdb" />
@@ -163,6 +188,17 @@
       <_Extra Include="$(PublishDir)av_libglesv2.dll" Condition="'$(IsWindowsBuild)' == 'true'" />
     </ItemGroup>
     <Delete Files="@(_Extra)" />
+  </Target>
+
+  <!-- Keep the published executable as the runnable Native AOT output. The linker can recreate its
+       intermediate executable on the next publish while retaining its compilation inputs. -->
+  <Target Name="RemoveIntermediateNativeExecutable" AfterTargets="CopyNativeBinary"
+          Condition="'$(PublishAot)' == 'true' AND '$(IsWindowsBuild)' == 'true' AND '$(NativeBinary)' != ''">
+    <PropertyGroup>
+      <_PublishedNativePath>$([MSBuild]::NormalizePath('$(PublishDir)', '$(NativeBinaryPrefix)$(TargetName)$(NativeBinaryExt)'))</_PublishedNativePath>
+      <_IntermediateNativePath>$([MSBuild]::NormalizePath('$(NativeBinary)'))</_IntermediateNativePath>
+    </PropertyGroup>
+    <Delete Files="$(NativeBinary)" Condition="Exists('$(_PublishedNativePath)') AND '$(_PublishedNativePath)' != '$(_IntermediateNativePath)'" />
   </Target>
 
 </Project>

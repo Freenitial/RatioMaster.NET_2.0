@@ -2,8 +2,13 @@ namespace RatioMaster.ViewModels;
 
 using System;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Linq;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Avalonia.Threading;
+using RatioMaster.Models;
 using RatioMaster.Engine;
 using RatioMaster.Services;
 
@@ -12,11 +17,31 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty]
     private RatioTabViewModel? selectedTab;
 
-    private int tabCounter;
+    [ObservableProperty]
+    private bool isShuttingDown;
 
-    public MainWindowViewModel()
+    private int tabCounter;
+    private readonly bool persistenceEnabled;
+    private bool initializing = true;
+    private bool saveQueued;
+    private bool saveFailureReported;
+
+    internal WindowPlacement? WindowPlacement { get; set; }
+    internal string? StartupWarning { get; private set; }
+
+    internal CloseBehavior CloseBehavior { get; set; } = CloseBehavior.Ask;
+
+    public bool HasActiveSessions => Tabs.Any(tab => tab.IsRunning || tab.IsTransitioning || tab.IsClosing);
+
+    public MainWindowViewModel(bool usePersistence = true)
     {
-        SessionData? session = SessionStore.Load();
+        persistenceEnabled = usePersistence;
+        if (usePersistence) StartupWarning = ClientCatalog.LoadUserProfiles(System.IO.Path.Combine(SessionStore.SettingsDirectory, "clients.json"));
+        SessionData? session = usePersistence ? SessionStore.Load() : null;
+        if (SessionStore.LoadWarning is { } warning && usePersistence)
+            StartupWarning = string.Join("\n", new[] { StartupWarning, warning }.Where(value => !string.IsNullOrEmpty(value)));
+        WindowPlacement = session?.Window;
+        CloseBehavior = session?.CloseBehavior ?? CloseBehavior.Ask;
         if (session?.Tabs is { Count: > 0 } saved)
         {
             foreach (TabState st in saved)
@@ -28,11 +53,10 @@ public partial class MainWindowViewModel : ObservableObject
         {
             CreateTab();
         }
+        initializing = false;
     }
 
-    /// <summary>Persist all tabs (portable settings + resume) to the session file.</summary>
-    /// <summary>Stop every running tab. Called before the app exits so each session gets its
-    /// <c>&amp;event=stopped</c> announce instead of leaving a phantom peer registered in the swarm.</summary>
+    /// <summary>Request an immediate stop for every tab.</summary>
     public void StopAll()
     {
         foreach (RatioTabViewModel t in Tabs)
@@ -41,15 +65,51 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    /// <summary>Wait for every tab to finish stopping and finalize its counters.</summary>
+    public async Task StopAllAsync()
+    {
+        Task[] stops = Tabs.ToArray().Select(StopTabAsync).ToArray();
+        await Task.WhenAll(stops);
+    }
+
+    private static async Task StopTabAsync(RatioTabViewModel tab) => await tab.StopIfRunningAsync();
+
+    /// <summary>Persist all tabs and the global close preference to the session file.</summary>
     public void SaveSession()
     {
-        SessionData data = new();
+        if (persistenceEnabled) SessionStore.Save(CaptureSession());
+    }
+
+    internal SessionData CaptureSession()
+    {
+        SessionData data = new() { CloseBehavior = CloseBehavior, Window = WindowPlacement };
         foreach (RatioTabViewModel t in Tabs)
         {
             data.Tabs.Add(t.CaptureState());
         }
 
-        SessionStore.Save(data);
+        return data;
+    }
+
+    internal void RequestSave()
+    {
+        if (!persistenceEnabled || initializing || IsShuttingDown || saveQueued) return;
+        saveQueued = true;
+        Dispatcher.UIThread.Post(async () =>
+        {
+            saveQueued = false;
+            if (IsShuttingDown) return;
+            try
+            {
+                await SessionStore.SaveAsync(CaptureSession());
+                saveFailureReported = false;
+            }
+            catch (Exception ex)
+            {
+                if (!saveFailureReported) NotificationHub.Show("Unable to save", ex.Message, error: true);
+                saveFailureReported = true;
+            }
+        }, DispatcherPriority.Background);
     }
 
     public ObservableCollection<RatioTabViewModel> Tabs { get; } = [];
@@ -62,7 +122,12 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void AddTab()
     {
-        // A user-opened tab marks a power user → kill all onboarding pulsing for the session.
+        if (IsShuttingDown)
+        {
+            return;
+        }
+
+        // Opening another tab disables onboarding pulsing for all tabs.
         RatioTabViewModel.DisablePulsingGlobally();
         CreateTab();
         foreach (RatioTabViewModel t in Tabs)
@@ -75,39 +140,76 @@ public partial class MainWindowViewModel : ObservableObject
     {
         tabCounter++;
         RatioTabViewModel tab = new($"RM {tabCounter}");
+        tab.PropertyChanged += OnTabPropertyChanged;
         Tabs.Add(tab);
         SelectedTab = tab;
+        OnPropertyChanged(nameof(HasActiveSessions));
+        RequestSave();
         return tab;
     }
 
     [RelayCommand]
     private void SelectTab(RatioTabViewModel? tab)
     {
-        if (tab != null)
+        if (!IsShuttingDown && tab != null && Tabs.Contains(tab))
         {
             SelectedTab = tab;
         }
     }
 
     [RelayCommand]
-    private void CloseTab(RatioTabViewModel? tab)
+    private async Task CloseTabAsync(RatioTabViewModel? tab)
     {
         tab ??= SelectedTab;
-        if (tab == null || Tabs.Count <= 1)
+        if (IsShuttingDown || tab == null || Tabs.Count <= 1 || !Tabs.Contains(tab))
         {
             return;
         }
 
-        int index = Tabs.IndexOf(tab);
-        bool closingSelected = ReferenceEquals(tab, SelectedTab);
-        tab.StopIfRunning();
-        Tabs.Remove(tab);
-
-        // Only move the selection when the tab being closed WAS the selected one. Closing another tab
-        // (its × is reachable without selecting it) used to yank the user away from the tab they were on.
-        if (closingSelected)
+        tab.IsClosing = true;
+        try
         {
-            SelectedTab = Tabs.Count > 0 ? Tabs[Math.Min(index, Tabs.Count - 1)] : null;
+            await StopTabAsync(tab);
+            if (IsShuttingDown || Tabs.Count <= 1 || !Tabs.Contains(tab))
+            {
+                return;
+            }
+
+            int index = Tabs.IndexOf(tab);
+            bool closingSelected = ReferenceEquals(tab, SelectedTab);
+            tab.PropertyChanged -= OnTabPropertyChanged;
+            Tabs.Remove(tab);
+
+            // Preserve the current selection when a different tab finishes closing.
+            if (closingSelected)
+            {
+                SelectedTab = Tabs[Math.Min(index, Tabs.Count - 1)];
+            }
+
+            OnPropertyChanged(nameof(HasActiveSessions));
+            tab.ReleaseResources();
+            RequestSave();
+        }
+        catch (Exception ex)
+        {
+            NotificationHub.Show("Unable to close tab", ex.Message, error: true);
+        }
+        finally { if (Tabs.Contains(tab)) tab.IsClosing = false; }
+    }
+
+    private void OnTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is "TabName" or "TorrentFilePath" or "Tracker" or "HashHex"
+            or "UploadSpeed" or "DownloadSpeed" or "RandomUpload" or "RandomDownload"
+            or "IntervalText" or "FinishedText" or "SelectedStopWhen" or "StopValue"
+            or "SelectedFamily" or "SelectedVersion" or "CustomKey" or "CustomPeerId"
+            or "CustomPort" or "CustomPeers" or "RealisticMode" or "UseTcpListener" or "RequestScrape"
+            or "SelectedProxyType" or "ProxyHost" or "ProxyUser" or "ProxyPass" or "ProxyPort"
+            or "EnableLog" or "IsRunning" or "IsPaused" or "IsTransitioning" or "HasFinished") RequestSave();
+        if (string.IsNullOrEmpty(e.PropertyName)
+            || e.PropertyName is nameof(RatioTabViewModel.IsRunning) or nameof(RatioTabViewModel.IsTransitioning) or nameof(RatioTabViewModel.IsClosing))
+        {
+            OnPropertyChanged(nameof(HasActiveSessions));
         }
     }
 
@@ -122,5 +224,5 @@ public partial class MainWindowViewModel : ObservableObject
 
 internal static class AppInfo
 {
-    internal const string Version = "2.0.1";
+    internal static string Version { get; } = typeof(AppInfo).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 }

@@ -92,8 +92,7 @@
     <Setter Property="Cursor" Value="Hand"/>
   </Style>
 
-  <!-- Bottom action buttons (START/STOP/…): larger label, kept centered even when tall.
-       Reduced horizontal padding so "Manual update" fits without clipping. -->
+  <!-- Bottom action buttons use centered labels and four units of horizontal padding. -->
   <Style Selector="Button.action">
     <Setter Property="FontSize" Value="{DynamicResource FontSizeMd}"/>
     <Setter Property="Padding" Value="4,6"/>
@@ -104,9 +103,8 @@
     <Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="HorizontalContentAlignment" Value="Center"/>
   </Style>
-  <!-- ".wraptext" buttons stretch the content presenter so a multi-word label (e.g. "Manual update")
-       can wrap to two centered lines instead of being clipped in a narrow button. -->
-  <Style Selector="Button.action.wraptext /template/ ContentPresenter#PART_ContentPresenter">
+  <!-- Adaptive labels use the available content width to select a full or compact caption. -->
+  <Style Selector="Button.action.adaptive-label /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
   </Style>
   <Style Selector="Button:pointerover /template/ ContentPresenter#PART_ContentPresenter">
@@ -209,6 +207,25 @@
     <Setter Property="Background" Value="{DynamicResource DarkPanelBgBrush}"/>
   </Style>
 
+  <Style Selector="Button.tab.running, Button.tab.paused, Button.tab.finished">
+    <Setter Property="Foreground" Value="White"/>
+  </Style>
+  <Style Selector="Button.tab.running /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#164D7A"/>
+  </Style>
+  <Style Selector="Button.tab.finished /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#1E5638"/>
+  </Style>
+  <Style Selector="Button.tab.paused /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#80691E"/>
+    <Style.Animations>
+      <Animation Duration="0:0:1.2" IterationCount="INFINITE" PlaybackDirection="Alternate" Easing="SineEaseInOut">
+        <KeyFrame Cue="0%"><Setter Property="Background" Value="#3A3010"/></KeyFrame>
+        <KeyFrame Cue="100%"><Setter Property="Background" Value="#897024"/></KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
   <Style Selector="Button.tabclose">
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
@@ -275,7 +292,7 @@
   <!-- Compact stat block for the status bar -->
   <Style Selector="TextBlock.stat">
     <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
-    <Setter Property="FontSize" Value="{DynamicResource FontSizeXs}"/>
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}"/>
     <Setter Property="VerticalAlignment" Value="Center"/>
   </Style>
 

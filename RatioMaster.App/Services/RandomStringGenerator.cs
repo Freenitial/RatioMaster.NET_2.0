@@ -1,86 +1,90 @@
 namespace RatioMaster.Services;
 
 using System;
+using System.Security.Cryptography;
 using System.Text;
+using RatioMaster.Models;
 
-/// <summary>Generates random client keys / peer-id tails and URL-encodes binary strings.</summary>
+/// <summary>Generates client identity bytes and percent-encodes their Latin-1 representation.</summary>
 internal sealed class RandomStringGenerator
 {
-    private static readonly char[] Alphanumeric =
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".ToCharArray();
+    private const string Alphanumeric = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    internal const string LibtorrentAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.!~*()";
 
-    private readonly Random rng = new();
-
-    internal char GetRandomCharacter() => Alphanumeric[rng.Next(Alphanumeric.Length)];
-
+    internal char GetRandomCharacter() => Alphanumeric[RandomNumberGenerator.GetInt32(Alphanumeric.Length)];
     internal string Generate(int length) => Generate(length, randomness: false);
 
-    /// <summary>Random string. When <paramref name="randomness"/> is true, raw bytes 0..254.</summary>
-    internal string Generate(int length, bool randomness)
-    {
-        StringBuilder sb = new(length);
-        for (int i = 0; i < length; i++)
-        {
-            sb.Append(randomness ? (char)rng.Next(255) : GetRandomCharacter());
-        }
+    /// <summary>With randomness enabled, every byte from 0 through 255 is eligible.</summary>
+    internal string Generate(int length, bool randomness) => randomness
+        ? GenerateBytes(length, 0, 256)
+        : Generate(length, Alphanumeric.AsSpan());
 
-        return sb.ToString();
+    internal string Generate(int length, char[] charArray) => Generate(length, charArray.AsSpan());
+
+    internal string Generate(int length, ReadOnlySpan<char> alphabet)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (alphabet.IsEmpty) throw new ArgumentException("The alphabet cannot be empty.", nameof(alphabet));
+        char[] output = new char[length];
+        for (int index = 0; index < output.Length; index++)
+            output[index] = alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)];
+        return new string(output);
     }
 
-    internal string Generate(int length, char[] charArray)
+    internal string GenerateBytes(int length, int minimum, int exclusiveMaximum)
     {
-        StringBuilder sb = new(length);
-        for (int i = 0; i < length; i++)
-        {
-            sb.Append(charArray[rng.Next(charArray.Length)]);
-        }
-
-        return sb.ToString();
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (minimum < 0 || exclusiveMaximum > 256 || minimum >= exclusiveMaximum)
+            throw new ArgumentOutOfRangeException(nameof(minimum));
+        char[] output = new char[length];
+        for (int index = 0; index < output.Length; index++)
+            output[index] = (char)RandomNumberGenerator.GetInt32(minimum, exclusiveMaximum);
+        return new string(output);
     }
 
-    /// <summary>
-    /// Percent-encode every non-alphanumeric / non-ASCII character (BitTorrent %XX form).
-    /// </summary>
-    /// <remarks>
-    /// Encodes the LATIN-1 BYTES rather than the chars. Going per-char, a value above U+00FF produced
-    /// <c>Convert.ToString(c, 16)</c> = three or four hex digits, i.e. a malformed escape like "%20ac"
-    /// that no tracker can parse. Working on bytes always yields exactly two digits, and it matches how
-    /// the same string is written to the peer-wire handshake (also Latin-1), so the announced value and
-    /// the one on the wire cannot drift apart.
-    /// </remarks>
-    internal string UrlEncode(string input, bool upperCase)
+    /// <summary>Transmission 4.0.6 maps random bytes modulo 36 and appends a base-36 checksum.</summary>
+    internal string GenerateTransmissionTail()
     {
-        byte[] bytes = Encoding.Latin1.GetBytes(input);
-        StringBuilder sb = new(bytes.Length * 3);
+        const string alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+        Span<byte> random = stackalloc byte[11];
+        RandomNumberGenerator.Fill(random);
+        Span<char> output = stackalloc char[12];
+        int total = 0;
+        for (int index = 0; index < random.Length; index++)
+        {
+            int value = random[index] % alphabet.Length;
+            total += value;
+            output[index] = alphabet[value];
+        }
+        output[^1] = alphabet[(alphabet.Length - total % alphabet.Length) % alphabet.Length];
+        return new string(output);
+    }
+
+    internal string UrlEncode(string input, bool upperCase) => UrlEncode(input, upperCase, ClientUrlEncoding.Libtorrent);
+
+    /// <summary>Each character represents one byte; values outside Latin-1 are rejected.</summary>
+    internal string UrlEncode(string input, bool upperCase, ClientUrlEncoding policy)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        StringBuilder output = new(input.Length * 3);
         string digits = upperCase ? "0123456789ABCDEF" : "0123456789abcdef";
-        foreach (byte b in bytes)
+        foreach (char value in input)
         {
-            if (IsUnreserved(b))
-            {
-                sb.Append((char)b);
-            }
-            else
-            {
-                sb.Append('%').Append(digits[b >> 4]).Append(digits[b & 0x0F]);
-            }
+            if (value > byte.MaxValue)
+                throw new ArgumentException("Binary URL values must contain Latin-1 bytes only.", nameof(input));
+            byte current = (byte)value;
+            if (IsUnreserved(current, policy)) output.Append(value);
+            else output.Append('%').Append(digits[current >> 4]).Append(digits[current & 15]);
         }
-
-        return sb.ToString();
+        return output.ToString();
     }
 
-    /// <summary>
-    /// The unreserved set libtorrent's <c>escape_string</c> uses (RFC 2396 §2.3 minus the apostrophe):
-    /// alphanumerics plus <c>-_.!~*()</c>.
-    /// </summary>
-    /// <remarks>
-    /// The punctuation matters. Escaping only alphanumerics is still a VALID URL — a tracker decodes it to
-    /// the same bytes — but it is not what the emulated clients actually send, and the difference is plainly
-    /// visible in the raw query: real qBittorrent announces "peer_id=-qB5100-xxxx" while escaping everything
-    /// yields "peer_id=%2dqB5100%2dxxxx". A tracker logging raw queries can pick that out at a glance, which
-    /// is exactly the kind of tell an emulation profile exists to avoid. The same set applies to info_hash,
-    /// since libtorrent escapes both with the one function.
-    /// </remarks>
-    private static bool IsUnreserved(byte b) =>
-        (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-        || b is (byte)'-' or (byte)'_' or (byte)'.' or (byte)'!' or (byte)'~' or (byte)'*' or (byte)'(' or (byte)')';
+    private static bool IsUnreserved(byte value, ClientUrlEncoding policy)
+    {
+        if (value is >= (byte)'a' and <= (byte)'z' or >= (byte)'A' and <= (byte)'Z' or >= (byte)'0' and <= (byte)'9')
+            return true;
+        if (policy == ClientUrlEncoding.Alphanumeric) return false;
+        if (value is (byte)'-' or (byte)'_' or (byte)'.' or (byte)'~') return true;
+        return policy == ClientUrlEncoding.Libtorrent && value is (byte)'!' or (byte)'*' or (byte)'(' or (byte)')';
+    }
 }

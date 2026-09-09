@@ -1,6 +1,7 @@
 namespace RatioMaster.Engine;
 
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 internal static class NetInfo
@@ -10,9 +11,11 @@ internal static class NetInfo
     {
         try
         {
-            foreach (IPAddress address in Dns.GetHostEntry(string.Empty).AddressList)
+            foreach (IPAddress address in NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up)
+                .SelectMany(n => n.GetIPProperties().UnicastAddresses).Select(a => a.Address))
             {
-                if (address.AddressFamily == AddressFamily.InterNetwork)
+                if (address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address))
                 {
                     return address.ToString();
                 }

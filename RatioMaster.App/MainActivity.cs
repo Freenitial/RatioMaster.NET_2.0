@@ -1,25 +1,21 @@
-// Android entry point — compiled ONLY for the net11.0-android target (multi-target gated on
-// -p:IncludeAndroid=true, which build_RatioMaster_setup.bat's apk/aab phase sets). The ANDROID symbol
-// is auto-defined for net11.0-android, so on every desktop build this whole file is empty and pulls in
-// no Avalonia.Android reference. ONE project + ONE shared UI (App + MainView); Android adds only this
-// Activity + a manifest (both inert on desktop).
+// Android entry point, compiled only for the Android target.
 #if ANDROID
 using System;
+using System.Runtime.Versioning;
 using Android.App;
+using Android.Content;
 using Android.Content.PM;
 using Android.OS;
 using Android.Runtime;
+using Android.Window;
 using Avalonia;
 using Avalonia.Android;
+using RatioMaster.Services;
 
 namespace RatioMaster;
 
 /// <summary>
-/// Avalonia 12 moved the Android bootstrap onto the <c>Android.App.Application</c> subclass
-/// (<see cref="AvaloniaAndroidApplication{TApp}"/>): <c>CustomizeAppBuilder</c> lives here, and the
-/// activity is the non-generic <see cref="AvaloniaMainActivity"/>. Avalonia drives the single-view
-/// lifetime, so the shared <c>App.OnFrameworkInitializationCompleted</c> takes its
-/// <c>ISingleViewApplicationLifetime</c> branch and shows <c>MainView</c>.
+/// Initializes Avalonia's Android application and shared single-view lifetime.
 /// </summary>
 [Application]
 public class MainApplication : AvaloniaAndroidApplication<App>
@@ -35,50 +31,126 @@ public class MainApplication : AvaloniaAndroidApplication<App>
 }
 
 /// <summary>
-/// We DO declare Orientation/ScreenSize in ConfigurationChanges so a rotation does NOT recreate the
-/// activity — RatioMaster keeps running emulation sessions + open tabs, which an activity restart would
-/// throw away. The safe area refreshes via the AndroidX WindowInsets listener below (re-fires on any inset
-/// change, incl. rotation), which feeds <see cref="RatioMaster.Services.MobileInsets"/>.
+/// Hosts the shared view and handles configuration changes without recreating it.
+/// The AndroidX insets listener forwards safe-area changes to <see cref="MobileInsets"/>.
 /// </summary>
 [Activity(
     Label = "RatioMaster.NET",
     Theme = "@style/MyTheme.NoActionBar",
     Icon = "@mipmap/icon",
     MainLauncher = true,
+    EnableOnBackInvokedCallback = true,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode)]
 public class MainActivity : AvaloniaMainActivity
 {
+    private const int NotificationPermissionRequestCode = 1;
+    private const string PermissionPreferences = "ratiomaster.permissions";
+    private const string NotificationPermissionAsked = "post_notifications_asked";
+    private BackInvokedCallback? backCallback;
+
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
-        // Read the REAL per-orientation safe-area insets and forward them to the shared view (MobileInsets)
-        // WITHOUT consuming them (the OS keeps its own positioning). AndroidX WindowInsetsCompat works back
-        // to API 21 — the platform WindowInsets.GetInsets(type) is API 30+, which would leave Android 7-10
-        // (our minSdk 24) with no safe area at all. The listener also re-fires on any inset change, so a
-        // no-recreate rotation still refreshes the safe area.
+        // Forward inset changes, including rotation, without consuming the system's insets.
         if (Window?.DecorView is { } decor)
         {
             AndroidX.Core.View.ViewCompat.SetOnApplyWindowInsetsListener(decor, new SafeAreaInsetsListener());
         }
 
-        // Wire the foreground service to the shared session counter, so a running session survives the app
-        // being backgrounded instead of being throttled and killed.
         ForegroundSessionBridge.Attach(this);
+        RequestNotificationPermissionOnce();
+    }
 
-        // POST_NOTIFICATIONS is a runtime permission from Android 13. Ask once, up front rather than at the
-        // moment a session starts, so the dialog never interrupts a Start. Denial is not fatal: the
-        // foreground service still runs, the user just doesn't get its notification.
-        if (OperatingSystem.IsAndroidVersionAtLeast(33) &&
-            CheckSelfPermission(Android.Manifest.Permission.PostNotifications) != Android.Content.PM.Permission.Granted)
+    protected override void OnResume()
+    {
+        base.OnResume();
+
+        if (OperatingSystem.IsAndroidVersionAtLeast(33) && backCallback is null)
         {
-            RequestPermissions([Android.Manifest.Permission.PostNotifications], 1);
+            // Avalonia registers its callback in OnStart; register afterwards at the same priority.
+            backCallback = new BackInvokedCallback(this);
+            OnBackInvokedDispatcher.RegisterOnBackInvokedCallback(
+                IOnBackInvokedDispatcher.PriorityDefault, backCallback);
         }
     }
 
-    // Single-view hosts raise no shutdown/closing event, so persist the session when Android backgrounds
-    // the activity (the last reliable point before the process may be killed). Best-effort.
+    [ObsoletedOSPlatform("android33.0")]
+    public override void OnBackPressed() => HandleBack();
+
+    private void HandleBack()
+    {
+        if (RatioMaster.App.TryDismissDialog?.Invoke() == true)
+        {
+            return;
+        }
+
+        if (SessionActivity.IsActive)
+        {
+            MoveTaskToBack(true);
+        }
+        else
+        {
+            Finish();
+        }
+    }
+
+    private void UnregisterBackCallback()
+    {
+        if (OperatingSystem.IsAndroidVersionAtLeast(33) && backCallback is { } callback)
+        {
+            OnBackInvokedDispatcher.UnregisterOnBackInvokedCallback(callback);
+            backCallback = null;
+            callback.Dispose();
+        }
+    }
+
+    private void RequestNotificationPermissionOnce()
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(33))
+        {
+            return;
+        }
+
+        using ISharedPreferences preferences = GetSharedPreferences(PermissionPreferences, FileCreationMode.Private)!;
+        if (preferences.GetBoolean(NotificationPermissionAsked, false))
+        {
+            return;
+        }
+
+        // Apply updates memory immediately and schedules persistence before the activity is stopped.
+        // Record the attempt before opening the system dialog, including cancellation or recreation.
+        MarkNotificationPermissionAsked();
+
+        // Notification permission does not gate starting a foreground service.
+        if (CheckSelfPermission(Android.Manifest.Permission.PostNotifications) != Permission.Granted)
+        {
+            RequestPermissions([Android.Manifest.Permission.PostNotifications], NotificationPermissionRequestCode);
+        }
+    }
+
+    public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
+    {
+        base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == NotificationPermissionRequestCode)
+        {
+            // A denial or an empty cancellation result must not trigger another automatic request.
+            MarkNotificationPermissionAsked();
+        }
+    }
+
+    private void MarkNotificationPermissionAsked()
+    {
+        using ISharedPreferences preferences = GetSharedPreferences(PermissionPreferences, FileCreationMode.Private)!;
+        using ISharedPreferencesEditor editor = preferences.Edit()!;
+        editor.PutBoolean(NotificationPermissionAsked, true);
+        editor.Apply();
+    }
+
+    // Single-view hosts have no closing event; persist when the activity loses the foreground.
     protected override void OnPause()
     {
+        UnregisterBackCallback();
         base.OnPause();
         try
         {
@@ -88,6 +160,18 @@ public class MainActivity : AvaloniaMainActivity
         {
             // best-effort persistence
         }
+    }
+
+    protected override void OnDestroy()
+    {
+        UnregisterBackCallback();
+        base.OnDestroy();
+    }
+
+    [SupportedOSPlatform("android33.0")]
+    private sealed class BackInvokedCallback(MainActivity activity) : Java.Lang.Object, IOnBackInvokedCallback
+    {
+        public void OnBackInvoked() => activity.HandleBack();
     }
 }
 

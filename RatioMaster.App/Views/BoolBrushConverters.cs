@@ -10,6 +10,7 @@ using RatioMaster.ViewModels;
 public static class BoolBrushConverters
 {
     private static readonly IBrush Running = new SolidColorBrush(Color.FromRgb(0x50, 0xE6, 0x8C));
+    private static readonly IBrush Active = new SolidColorBrush(Color.FromRgb(0x65, 0xB8, 0xFE));
     private static readonly IBrush Idle = new SolidColorBrush(Color.FromRgb(0x5A, 0x5A, 0x5C));
     private static readonly IBrush Warning = new SolidColorBrush(Color.FromRgb(0xE8, 0xC0, 0x4A));
     private static readonly IBrush Error = new SolidColorBrush(Color.FromRgb(0xE8, 0x5C, 0x5C));
@@ -23,7 +24,8 @@ public static class BoolBrushConverters
         {
             TabDotState.Error => Error,
             TabDotState.Warning => Warning,
-            TabDotState.Running => Running,
+            TabDotState.Running => Active,
+            TabDotState.Finished => Running,
             _ => Idle,
         });
 

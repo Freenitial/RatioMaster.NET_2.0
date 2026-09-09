@@ -1,0 +1,100 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- The transparent thumb bounds receive input; only the centered three-unit rail is painted. -->
+  <ControlTheme x:Key="TerminalScrollThumb" TargetType="Thumb">
+    <Setter Property="Background" Value="{DynamicResource TextMutedBrush}"/>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="Transparent" ClipToBounds="True">
+          <Border Name="ThumbVisual" Background="{TemplateBinding Background}" CornerRadius="1.5"/>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^.vertical /template/ Border#ThumbVisual">
+      <Setter Property="Width" Value="3"/>
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="0,2"/>
+    </Style>
+    <Style Selector="^.horizontal /template/ Border#ThumbVisual">
+      <Setter Property="Height" Value="3"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="2,0"/>
+    </Style>
+    <Style Selector="^:pointerover">
+      <Setter Property="Background" Value="{DynamicResource TextSecondaryBrush}"/>
+    </Style>
+    <Style Selector="^:pressed">
+      <Setter Property="Background" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+  </ControlTheme>
+
+  <ControlTheme x:Key="TerminalScrollPageButton" TargetType="RepeatButton">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="MinWidth" Value="0"/>
+    <Setter Property="MinHeight" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="{TemplateBinding Background}"/>
+      </ControlTemplate>
+    </Setter>
+  </ControlTheme>
+
+  <!-- PART_PageUpButton/PART_PageDownButton and Track retain Avalonia's native scrolling behavior. -->
+  <ControlTheme x:Key="TerminalScrollBar" TargetType="ScrollBar">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="MinWidth" Value="0"/>
+    <Setter Property="MinHeight" Value="0"/>
+    <Setter Property="AllowAutoHide" Value="False"/>
+    <Setter Property="Cursor" Value="Arrow"/>
+    <Setter Property="ClipToBounds" Value="True"/>
+    <Style Selector="^:vertical">
+      <Setter Property="Width" Value="14"/>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}">
+            <Track Name="TerminalTrack" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                   Value="{TemplateBinding Value, Mode=TwoWay}" ViewportSize="{TemplateBinding ViewportSize}"
+                   Orientation="Vertical" IsDirectionReversed="True"
+                   DeferThumbDrag="{TemplateBinding ScrollViewer.IsDeferredScrollingEnabled}">
+              <Track.DecreaseButton>
+                <RepeatButton Name="PART_PageUpButton" Theme="{StaticResource TerminalScrollPageButton}"
+                              AutomationProperties.Name="Page up"/>
+              </Track.DecreaseButton>
+              <Track.IncreaseButton>
+                <RepeatButton Name="PART_PageDownButton" Theme="{StaticResource TerminalScrollPageButton}"
+                              AutomationProperties.Name="Page down"/>
+              </Track.IncreaseButton>
+              <Thumb Name="TerminalThumb" Classes="vertical" Theme="{StaticResource TerminalScrollThumb}"
+                     Width="14" MinHeight="24" AutomationProperties.Name="Vertical position"/>
+            </Track>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="^:horizontal">
+      <Setter Property="Height" Value="14"/>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}">
+            <Track Name="TerminalTrack" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                   Value="{TemplateBinding Value, Mode=TwoWay}" ViewportSize="{TemplateBinding ViewportSize}"
+                   Orientation="Horizontal" DeferThumbDrag="{TemplateBinding ScrollViewer.IsDeferredScrollingEnabled}">
+              <Track.DecreaseButton>
+                <RepeatButton Name="PART_PageUpButton" Theme="{StaticResource TerminalScrollPageButton}"
+                              AutomationProperties.Name="Page left"/>
+              </Track.DecreaseButton>
+              <Track.IncreaseButton>
+                <RepeatButton Name="PART_PageDownButton" Theme="{StaticResource TerminalScrollPageButton}"
+                              AutomationProperties.Name="Page right"/>
+              </Track.IncreaseButton>
+              <Thumb Name="TerminalThumb" Classes="horizontal" Theme="{StaticResource TerminalScrollThumb}"
+                     Height="14" MinWidth="24" AutomationProperties.Name="Horizontal position"/>
+            </Track>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+  </ControlTheme>
+</ResourceDictionary>

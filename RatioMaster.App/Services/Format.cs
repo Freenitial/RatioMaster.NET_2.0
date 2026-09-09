@@ -4,6 +4,12 @@ using System.Globalization;
 
 internal static class Format
 {
+    internal static string Countdown(int seconds)
+    {
+        seconds = System.Math.Max(0, seconds);
+        return $"{seconds / 3600:00}:{seconds / 60 % 60:00}:{seconds % 60:00}";
+    }
+
     internal static string FileSize(long bytes)
     {
         if (bytes < 0)
@@ -13,9 +19,9 @@ internal static class Format
 
         return bytes switch
         {
-            >= 0x40000000 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} GB", bytes / 1073741824.0),
-            >= 0x100000 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} MB", bytes / 1048576.0),
-            >= 0x400 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} KB", bytes / 1024.0),
+            >= 0x40000000 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} GiB", bytes / 1073741824.0),
+            >= 0x100000 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} MiB", bytes / 1048576.0),
+            >= 0x400 => string.Format(CultureInfo.InvariantCulture, "{0:0.00} KiB", bytes / 1024.0),
             _ => bytes + " bytes",
         };
     }

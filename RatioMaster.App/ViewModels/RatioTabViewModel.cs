@@ -6,6 +6,8 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -24,7 +26,9 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     private const int GraphPoints = 90;
 
-    private readonly RatioEngine engine;
+    private RatioEngine engine;
+    private Task pendingStop = Task.CompletedTask;
+    private bool activityCounted;
     private Torrent? loadedTorrent;
     // Real, re-openable path to the loaded .torrent — equals TorrentFilePath on desktop, but on Android
     // (where the picker yields a content:// URI shown only by name) it points at a private materialized copy.
@@ -33,11 +37,16 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     // Every cache copy currently referenced by SOME tab, so pruning can never evict one that is still in
     // use. Static because pruning is global over the shared cache directory.
-    private static readonly HashSet<string> InUseCachePaths = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, int> InUseCachePaths = new(StringComparer.OrdinalIgnoreCase);
     private byte[] infoHash = [];
+    private string counterInfoHash = string.Empty;
     private long totalLength;
     private int pieceCount;
     private bool suppressVersionReload;
+    private bool assigningIdentity;
+    private bool keyIsGenerated;
+    private bool peerIdIsGenerated;
+    private readonly TerminalBuffer terminalBuffer = new();
     // Set while SetTorrentContent (Android) assigns the display NAME to TorrentFilePath — that assignment
     // isn't a "clear", so the change hook must not wipe the torrent state we're about to set right after.
     private bool suppressTorrentReset;
@@ -45,7 +54,9 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private long resumeDownloaded;
     private long lastUploaded;
     private long lastDownloaded;
-    private readonly double[] uploadGraph = new double[GraphPoints];
+    private readonly TransferRateHistory uploadHistory = new(GraphPoints);
+    private bool released;
+    private StopConditionSettings stopCondition = new("When upload >", "1000");
 
     // ── Header / torrent ──
     [ObservableProperty]
@@ -63,10 +74,24 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     [ObservableProperty]
     private string torrentSize = string.Empty;
 
-    // ── Speeds (MB/s) ──
-    // "Random" replaces both the old per-second "+ random min/max" noise AND the speed half of the old
-    // single "realistic mode": it varies the rate along a smooth, slowly drifting curve (×0.55…1.15)
-    // around the value below, independently per direction. Unchecked = an exact, flat rate.
+    [ObservableProperty]
+    private bool smallTorrentWarning;
+
+    public string SizeTip => SmallTorrentWarning
+        ? "This torrent is smaller than 8 GiB. Consider a torrent of 10 GiB or more. Size is only a guideline; it does not prevent tracker detection or bans."
+        : "Total size of the torrent contents. A torrent of 10 GiB or more is preferable. Size alone does not prevent tracker detection or bans.";
+
+    partial void OnSmallTorrentWarningChanged(bool value) => OnPropertyChanged(nameof(SizeTip));
+
+    internal static bool IsSmallTorrent(long bytes) => bytes >= 0 && bytes < 8L * 1024 * 1024 * 1024;
+
+    [ObservableProperty]
+    private bool manualUpdatePending;
+
+    [ObservableProperty]
+    private string nextUpdateCountdown = "00:00:00";
+
+    // Independent upload and download speed variation; rates are expressed in MiB/s.
     [ObservableProperty]
     private string uploadSpeed = "100";
 
@@ -87,7 +112,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private string finishedText = "100";
 
     [ObservableProperty]
-    private string selectedStopWhen = "When uploaded >";
+    private string selectedStopWhen = "When upload >";
 
     [ObservableProperty]
     private string stopValue = "1000";
@@ -96,7 +121,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private bool stopValueVisible = true;
 
     [ObservableProperty]
-    private string stopUnit = "GB";
+    private string stopUnit = "GiB";
 
     // ── Client emulation ──
     [ObservableProperty]
@@ -118,9 +143,6 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private string customPeers = string.Empty;
 
     [ObservableProperty]
-    private bool alwaysNewValues = true;
-
-    [ObservableProperty]
     private bool realisticMode = true;
 
     [ObservableProperty]
@@ -132,9 +154,6 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     [ObservableProperty]
     private bool requestScrape = true;
-
-    [ObservableProperty]
-    private bool ignoreFailureReason;
 
     // ── Proxy ──
     [ObservableProperty]
@@ -152,33 +171,27 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     [ObservableProperty]
     private string proxyPort = string.Empty;
 
-    // ── On next update: random speed level (PERCENT of the configured MB/s, 100 = as typed) ──
-    // decimal because Avalonia's NumericUpDown.Value is decimal? — binding a double would round-trip
-    // through a converter and lose the spinner's exact 10-step increments.
-    [ObservableProperty]
-    private bool nextRandUp;
-
-    [ObservableProperty]
-    private decimal? nextRandUpMinPercent = 50;
-
-    [ObservableProperty]
-    private decimal? nextRandUpMaxPercent = 150;
-
-    [ObservableProperty]
-    private bool nextRandDown;
-
-    [ObservableProperty]
-    private decimal? nextRandDownMinPercent = 50;
-
-    [ObservableProperty]
-    private decimal? nextRandDownMaxPercent = 150;
-
     // ── Log ──
     [ObservableProperty]
     private bool enableLog = true;
 
     [ObservableProperty]
     private string logText = string.Empty;
+
+    [ObservableProperty]
+    private string logFilter = string.Empty;
+
+    [ObservableProperty]
+    private bool followLog = true;
+
+    public string VisibleLogText => string.IsNullOrEmpty(LogFilter) ? LogText
+        : string.Join('\n', LogText.Split('\n').Where(line => line.Contains(LogFilter, StringComparison.OrdinalIgnoreCase)));
+
+    partial void OnLogTextChanged(string value) => OnPropertyChanged(nameof(VisibleLogText));
+    partial void OnLogFilterChanged(string value) => OnPropertyChanged(nameof(VisibleLogText));
+
+    [RelayCommand]
+    private void ClearLogFilter() => LogFilter = string.Empty;
 
     // ── Live stats ──
     [ObservableProperty]
@@ -191,10 +204,15 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private string ratioText = "0.0";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SeedersCountText))]
     private string seedersText = "Seeders: -";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(LeechersCountText))]
     private string leechersText = "Leechers: -";
+
+    public string SeedersCountText => SeedersText.StartsWith("Seeders: ", StringComparison.Ordinal) ? SeedersText[9..] : SeedersText;
+    public string LeechersCountText => LeechersText.StartsWith("Leechers: ", StringComparison.Ordinal) ? LeechersText[10..] : LeechersText;
 
     [ObservableProperty]
     private string totalTimeText = "00:00";
@@ -238,10 +256,32 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         LoadVersions(SelectedFamily);
         RegenerateValues();
 
-        engine = new RatioEngine(this);
-        engine.Log += s => Post(() => AppendLog(s));
-        engine.Stats += s => Post(() => ApplyStats(s));
-        engine.Stopped += r => Post(() => OnEngineStopped(r));
+        engine = CreateEngine();
+    }
+
+    private RatioEngine CreateEngine()
+    {
+        RatioEngine created = new(this);
+        int statsPending = 0;
+        created.Log += message => { if (!released && ReferenceEquals(engine, created)) AppendLog(message); };
+        created.KeyChanged += key => Post(() =>
+        {
+            if (released || !ReferenceEquals(engine, created) || !keyIsGenerated || (!IsRunning && !IsTransitioning)) return;
+            assigningIdentity = true;
+            CustomKey = key;
+            assigningIdentity = false;
+        });
+        created.Stats += _ =>
+        {
+            if (Interlocked.Exchange(ref statsPending, 1) != 0) return;
+            Post(() =>
+            {
+                Interlocked.Exchange(ref statsPending, 0);
+                if (!released && ReferenceEquals(engine, created)) ApplyStats(created.GetStats());
+            });
+        };
+        created.Stopped += reason => Post(() => { if (!released && ReferenceEquals(engine, created)) _ = OnEngineStoppedAsync(reason); });
+        return created;
     }
 
     public ObservableCollection<string> ClientFamilies { get; } = [];
@@ -250,7 +290,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     public ObservableCollection<string> StopWhenOptions { get; } =
     [
-        "Never", "When ratio >", "When uploaded >", "When downloaded >", "After time:", "When seeders <", "When leechers <",
+        "Never", "When ratio >", "When upload >", "When download >", "After time:", "When seeders <", "When leechers <", "When leechers / seeders <",
     ];
 
     public ObservableCollection<string> ProxyTypes { get; } =
@@ -272,53 +312,85 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     public bool StopUnitVisible => !string.IsNullOrEmpty(StopUnit);
 
-    public bool InputsEnabled => !IsRunning;
+    public bool InputsEnabled => !IsRunning && !IsTransitioning && !IsClosing;
+    public bool CanToggleSession => !IsTransitioning && !IsClosing;
+    public bool CanManualUpdate => IsRunning && !IsClosing && !IsTransitioning && !IsAnnouncing && !ManualUpdateSending;
+    public string PrimaryActionText => !IsRunning ? "START" : IsPaused ? "Resume" : "Pause";
+
+    public bool TabIsPaused => IsRunning && (IsPaused || UploadPausedNoLeechers);
+    public bool TabIsRunning => IsRunning && !TabIsPaused;
+    public bool TabIsFinished => !IsRunning && !IsTransitioning && HasFinished;
+    [ObservableProperty] private bool hasFinished;
+    partial void OnHasFinishedChanged(bool value) => NotifySessionState();
+
+    [ObservableProperty] private bool isClosing;
+    partial void OnIsClosingChanged(bool value) => NotifySessionState();
+    [ObservableProperty] private bool isPaused;
+    [ObservableProperty] private bool uploadPausedNoLeechers;
+    [ObservableProperty] private bool isTransitioning;
+    [ObservableProperty] private bool isAnnouncing;
+    [ObservableProperty] private bool manualUpdateSending;
+
+    private void NotifySessionState()
+    {
+        bool shouldCount = IsRunning || IsTransitioning;
+        if (activityCounted != shouldCount)
+        {
+            activityCounted = shouldCount;
+            if (shouldCount) SessionActivity.Entered(); else SessionActivity.Exited();
+        }
+        OnPropertyChanged(nameof(InputsEnabled));
+        OnPropertyChanged(nameof(CanToggleSession));
+        OnPropertyChanged(nameof(CanManualUpdate));
+        OnPropertyChanged(nameof(PrimaryActionText));
+        OnPropertyChanged(nameof(DotState));
+        OnPropertyChanged(nameof(TabIsPaused));
+        OnPropertyChanged(nameof(TabIsRunning));
+        OnPropertyChanged(nameof(TabIsFinished));
+        StartCommand.NotifyCanExecuteChanged();
+        StopCommand.NotifyCanExecuteChanged();
+        ManualUpdateCommand.NotifyCanExecuteChanged();
+        ConfirmManualUpdateCommand.NotifyCanExecuteChanged();
+        SetDefaultsCommand.NotifyCanExecuteChanged();
+    }
+    partial void OnIsPausedChanged(bool value) => NotifySessionState();
+    partial void OnUploadPausedNoLeechersChanged(bool value) => NotifySessionState();
+    partial void OnIsTransitioningChanged(bool value) => NotifySessionState();
+    partial void OnIsAnnouncingChanged(bool value) => NotifySessionState();
+    partial void OnManualUpdateSendingChanged(bool value) => NotifySessionState();
 
     // ══════════════════════ IEngineHost ══════════════════════
     bool IEngineHost.UseTcpListener => UseTcpListener;
 
     bool IEngineHost.RequestScrape => RequestScrape;
 
-    bool IEngineHost.IgnoreFailureReason => IgnoreFailureReason;
 
-    // Parsed as DOUBLE (ParseDoubleOr also accepts a comma decimal separator): the field is MB/s, and an
-    // integer-only parse silently returned 0 for a perfectly reasonable "2.5" or "0,5" — i.e. the tool
-    // uploaded nothing at all, with no hint as to why. Sub-1 MB/s rates are now expressible too.
-    long IEngineHost.UploadRateBytes => (long)(UploadSpeed.ParseDoubleOr(0) * 1024 * 1024);
+    // Decimal MiB/s values accept either a dot or a comma and are converted to bytes per second.
+    long IEngineHost.UploadRateBytes => ValidRate(UploadSpeed) ? (long)(UploadSpeed.ParseDoubleOr(0) * 1024 * 1024) : 0;
 
-    long IEngineHost.DownloadRateBytes => (long)(DownloadSpeed.ParseDoubleOr(0) * 1024 * 1024);
+    long IEngineHost.DownloadRateBytes => ValidRate(DownloadSpeed) ? (long)(DownloadSpeed.ParseDoubleOr(0) * 1024 * 1024) : 0;
 
     bool IEngineHost.RandomUploadEnabled => RandomUpload;
 
     bool IEngineHost.RandomDownloadEnabled => RandomDownload;
 
-    bool IEngineHost.NextRandUpEnabled => NextRandUp;
-
-    double IEngineHost.NextRandUpMinPercent => (double)(NextRandUpMinPercent ?? 50m);
-
-    double IEngineHost.NextRandUpMaxPercent => (double)(NextRandUpMaxPercent ?? 150m);
-
-    bool IEngineHost.NextRandDownEnabled => NextRandDown;
-
-    double IEngineHost.NextRandDownMinPercent => (double)(NextRandDownMinPercent ?? 50m);
-
-    double IEngineHost.NextRandDownMaxPercent => (double)(NextRandDownMaxPercent ?? 150m);
-
     string IEngineHost.StopWhen => SelectedStopWhen;
 
     string IEngineHost.StopValue => StopValue;
+    StopConditionSettings IEngineHost.StopCondition => Volatile.Read(ref stopCondition);
 
-    void IEngineHost.ApplyAlert(EngineAlert level, string message) => Post(() =>
+    void IEngineHost.ApplyAlert(EngineAlert level, string message)
     {
-        AlertLevel = level switch
-        {
-            EngineAlert.Ok => TabAlertLevel.Ok,
-            EngineAlert.Warning => TabAlertLevel.Warning,
-            EngineAlert.Error => TabAlertLevel.Error,
-            _ => TabAlertLevel.None,
-        };
-        AlertMessage = message;
-    });
+        // The UI consumes the alert together with counters and pause flags in one engine snapshot.
+    }
+
+    private void ApplyEngineAlert(EngineAlert level, string message) => SetAlert(level switch
+    {
+        EngineAlert.Ok => TabAlertLevel.Ok,
+        EngineAlert.Warning => TabAlertLevel.Warning,
+        EngineAlert.Error => TabAlertLevel.Error,
+        _ => TabAlertLevel.None,
+    }, message);
 
     /// <summary>Set the tab's alert line directly from the UI layer (torrent/config problems the engine
     /// never sees, e.g. "no torrent selected").</summary>
@@ -348,19 +420,24 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     {
         TabAlertLevel.Error => TabDotState.Error,
         TabAlertLevel.Warning => TabDotState.Warning,
-        _ => IsRunning ? TabDotState.Running : TabDotState.Idle,
+        _ => IsRunning && (IsPaused || UploadPausedNoLeechers) ? TabDotState.Warning
+            : IsRunning ? TabDotState.Running : HasFinished && !IsTransitioning ? TabDotState.Finished : TabDotState.Idle,
     };
 
     partial void OnAlertLevelChanged(TabAlertLevel value) => OnPropertyChanged(nameof(DotState));
 
     // ══════════════════════ Commands ══════════════════════
-    [RelayCommand(CanExecute = nameof(InputsEnabled))]
-    private void Start()
+    [RelayCommand(CanExecute = nameof(CanToggleSession))]
+    private async Task Start()
     {
+        if (IsTransitioning || IsClosing) return;
         if (IsRunning)
         {
+            if (engine.IsPaused) engine.Resume(); else engine.Pause();
+            ApplyStats(engine.GetStats());
             return;
         }
+        await pendingStop;
 
         if (loadedTorrent == null || string.IsNullOrEmpty(Tracker) || string.IsNullOrEmpty(HashHex))
         {
@@ -370,7 +447,8 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             return;
         }
 
-        if (!Uri.TryCreate(Tracker, UriKind.Absolute, out _))
+        if (!Uri.TryCreate(Tracker, UriKind.Absolute, out Uri? trackerUri)
+            || trackerUri.Scheme is not ("http" or "https" or "udp"))
         {
             StatusText = "Invalid tracker URL";
             AppendLog("Invalid tracker URL: " + Tracker);
@@ -378,22 +456,55 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             return;
         }
 
-        // Starting clears whatever the previous run left on the line; the first announce sets the real state.
+        if (!ClientCatalog.TryCreate(SelectedFamily, SelectedVersion, out ClientProfile client))
+        {
+            SetAlert(TabAlertLevel.Error, "The selected client profile is unavailable. Choose a listed family and version.");
+            return;
+        }
+        if (loadedTorrent.IsV2 && !loadedTorrent.IsHybrid && !client.SupportsV2)
+        {
+            SetAlert(TabAlertLevel.Error, "This client profile does not support pure v2 torrents. Choose a compatible profile such as qBittorrent.");
+            return;
+        }
+        if (!ProxyTypes.Contains(SelectedProxyType) || (SelectedProxyType != "None"
+            && (string.IsNullOrWhiteSpace(ProxyHost) || !ushort.TryParse(ProxyPort, out ushort proxyPort) || proxyPort == 0)))
+        {
+            SetAlert(TabAlertLevel.Error, "Choose a valid proxy type, host and port (1-65535).");
+            return;
+        }
+        if (trackerUri.Scheme == "udp" && SelectedProxyType != "None")
+        {
+            SetAlert(TabAlertLevel.Error, "UDP trackers cannot use this TCP proxy. Choose an HTTP(S) tracker or disable the proxy.");
+            return;
+        }
+        if (!ValidRate(UploadSpeed) || !ValidRate(DownloadSpeed))
+        {
+            SetAlert(TabAlertLevel.Error, "Enter finite, non-negative upload and download speeds.");
+            return;
+        }
+        // A new session starts with its own engine and callbacks.
         SetAlert(TabAlertLevel.None, string.Empty);
 
         SetPulseStage(PulseStage.None); // user reached Start — onboarding done
 
-        ClientProfile client = ClientCatalog.Create(SelectedFamily, SelectedVersion);
-
         string key = string.IsNullOrEmpty(CustomKey) ? client.Key : CustomKey;
-        string peerId = string.IsNullOrEmpty(CustomPeerId) ? client.PeerID : CustomPeerId;
+        string peerId = client.PeerID;
+        if (!string.IsNullOrEmpty(CustomPeerId) && !PeerIdentityText.TryParse(CustomPeerId, out peerId))
+        {
+            SetAlert(TabAlertLevel.Error, "Peer ID must contain 20 single-byte characters or hex: followed by 40 hexadecimal digits.");
+            return;
+        }
         string port = string.IsNullOrEmpty(CustomPort) ? Rng.Next(1025, 65535).ToString() : CustomPort;
         string numWant = string.IsNullOrEmpty(CustomPeers) ? client.DefNumWant.ToString() : CustomPeers;
 
         client.Key = key;
         client.PeerID = peerId;
+        assigningIdentity = true;
+        if (string.IsNullOrEmpty(CustomKey)) keyIsGenerated = true;
+        if (string.IsNullOrEmpty(CustomPeerId)) peerIdIsGenerated = true;
         CustomKey = key;
-        CustomPeerId = peerId;
+        CustomPeerId = PeerIdentityText.Format(peerId);
+        assigningIdentity = false;
         CustomPort = port;
         CustomPeers = numWant;
 
@@ -412,6 +523,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             Interval = IntervalText.ParseIntOr(1800),
             Port = port,
             Key = key,
+            KeyIsGenerated = keyIsGenerated,
             PeerID = peerId,
             NumWant = numWant,
             PieceCount = pieceCount,
@@ -420,9 +532,6 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             ResumeDownloaded = resumeDownloaded,
         };
 
-        // Resume is single-shot: consumed on the next Start, cleared afterwards.
-        resumeUploaded = 0;
-        resumeDownloaded = 0;
 
         UploadedText = "0";
         DownloadedText = "0";
@@ -431,35 +540,57 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         LeechersText = "Leechers: -";
         TotalTimeText = "00:00";
         TimerText = "updating...";
+        NextUpdateCountdown = Format.Countdown(Math.Clamp(cfg.Interval, 60, 86400));
         StatusText = "Running";
         // Baseline the graph at the RESUMED total (not 0): the engine reports a cumulative Uploaded that
         // already includes the resume base, so a 0 baseline would push the entire resumed total into the
         // first bar and flatten every real per-interval delta after a resume.
         lastUploaded = cfg.ResumeUploaded;
-        Array.Clear(uploadGraph);
-        GraphValues = (double[])uploadGraph.Clone();
+        uploadHistory.Reset(cfg.ResumeUploaded);
+        GraphValues = uploadHistory.Snapshot();
 
+        engine = CreateEngine();
+        IsPaused = UploadPausedNoLeechers = false;
         IsRunning = true;
-        engine.Start(cfg);
-    }
-
-    [RelayCommand(CanExecute = nameof(IsRunning))]
-    private void Stop()
-    {
-        if (!IsRunning)
+        try
         {
-            return;
+            engine.Start(cfg);
+            resumeUploaded = resumeDownloaded = 0;
         }
-
-        engine.Stop();
-        IsRunning = false;
-        StatusText = "Stopped";
-        TimerText = "stopped";
-        ClearTransientAlert();
+        catch (Exception ex)
+        {
+            IsRunning = false;
+            SetAlert(TabAlertLevel.Error, ex.Message);
+            StatusText = ex.Message;
+        }
     }
 
     [RelayCommand(CanExecute = nameof(IsRunning))]
-    private void ManualUpdate() => engine.ManualUpdate();
+    private Task Stop() => StopIfRunningAsync();
+
+    [RelayCommand(CanExecute = nameof(CanManualUpdate))]
+    private void ManualUpdate() => ManualUpdatePending = true;
+
+    [RelayCommand]
+    private void CancelManualUpdate() => ManualUpdatePending = false;
+
+    [RelayCommand(CanExecute = nameof(CanManualUpdate))]
+    private async Task ConfirmManualUpdate()
+    {
+        if (!ManualUpdatePending || !CanManualUpdate) return;
+        ManualUpdatePending = false;
+        ManualUpdateSending = true;
+        RatioEngine source = engine;
+        try
+        {
+            if (!await source.ManualUpdateAsync() && IsRunning && ReferenceEquals(engine, source))
+                SetAlert(TabAlertLevel.Warning, "An update is already in progress, or the tracker did not respond.");
+        }
+        finally { ManualUpdateSending = false; }
+    }
+
+    private static bool ValidRate(string text) => double.IsFinite(text.ParseDoubleOr(double.NaN))
+        && text.ParseDoubleOr(-1) >= 0 && text.ParseDoubleOr(0) <= long.MaxValue / (1024.0 * 1024 * 2);
 
     [RelayCommand(CanExecute = nameof(InputsEnabled))]
     private void SetDefaults()
@@ -475,14 +606,13 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
         IntervalText = "1800";
         FinishedText = "100";
-        SelectedStopWhen = "When uploaded >";
+        SelectedStopWhen = "When upload >";
         StopValue = "1000";
         StopValueVisible = true;
-        StopUnit = "GB";
+        StopUnit = "GiB";
 
         UseTcpListener = true;
         RequestScrape = true;
-        IgnoreFailureReason = false;
 
         SelectedProxyType = "None";
         ProxyHost = string.Empty;
@@ -490,32 +620,26 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         ProxyPass = string.Empty;
         ProxyPort = string.Empty;
 
-        NextRandUp = false;
-        NextRandUpMinPercent = 50;
-        NextRandUpMaxPercent = 150;
-        NextRandDown = false;
-        NextRandDownMinPercent = 50;
-        NextRandDownMaxPercent = 150;
 
         EnableLog = true;
-        AlwaysNewValues = true;
         RealisticMode = true;
         CustomPort = string.Empty;
         CustomPeers = string.Empty;
         RegenerateValues();
 
-        // Wipe the portable session file and any pending resume.
-        resumeUploaded = 0;
-        resumeDownloaded = 0;
-        SessionStore.Delete();
+        // Resetting settings preserves this torrent's counters and every other tab's saved state.
+        ClearLog();
     }
 
     [RelayCommand]
     private void RegenerateValues()
     {
         ClientProfile client = ClientCatalog.Create(SelectedFamily, SelectedVersion);
+        assigningIdentity = true;
         CustomKey = client.Key;
-        CustomPeerId = client.PeerID;
+        CustomPeerId = PeerIdentityText.Format(client.PeerID);
+        keyIsGenerated = peerIdIsGenerated = true;
+        assigningIdentity = false;
         if (string.IsNullOrEmpty(CustomPort))
         {
             CustomPort = Rng.Next(1025, 65535).ToString();
@@ -526,7 +650,14 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     }
 
     [RelayCommand]
-    private void ClearLog() => LogText = string.Empty;
+    private void ClearLog()
+    {
+        terminalBuffer.Clear();
+        LogText = string.Empty;
+        EngineStats snapshot = engine.GetStats();
+        uploadHistory.Reset(snapshot.IsActive ? snapshot.Uploaded : Math.Max(lastUploaded, resumeUploaded), snapshot.SampleElapsedSeconds);
+        GraphValues = uploadHistory.Snapshot();
+    }
 
     // ══════════════════════ Torrent loading ══════════════════════
     public void LoadTorrentMetadata(string path) => LoadTorrentCore(() => new Torrent(path));
@@ -545,25 +676,20 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         {
             Torrent t = open();
 
-            // Resume counters belong to the torrent they were captured for. Loading a DIFFERENT torrent
-            // must drop them, otherwise the first announce reports the previous torrent's totals — which
-            // can exceed the new torrent's own size, an obviously bogus figure to a tracker.
             byte[] newHash = t.InfoHash;
-            if (infoHash.Length > 0 && !infoHash.AsSpan().SequenceEqual(newHash))
-            {
-                resumeUploaded = 0;
-                resumeDownloaded = 0;
-                lastUploaded = 0;
-                lastDownloaded = 0;
-            }
+            string identity = Format.ToHex(newHash);
+            if (!string.Equals(counterInfoHash, identity, StringComparison.OrdinalIgnoreCase)) ResetCounters();
+            counterInfoHash = identity;
 
+            HasFinished = false;
             loadedTorrent = t;
             infoHash = newHash;
             totalLength = (long)t.TotalLength;
             pieceCount = t.PieceCount;
             Tracker = t.Announce;
-            HashHex = Format.ToHex(infoHash);
+            HashHex = Format.ToHex(t.IsHybrid ? t.InfoHash : t.FullInfoHash);
             TorrentSize = Format.FileSize(totalLength);
+            SmallTorrentWarning = IsSmallTorrent(totalLength);
             StatusText = "Loaded: " + t.Name;
 
             // Torrent defined → move the pulse hint onto the Stop-value box.
@@ -574,16 +700,17 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         }
         catch (Exception ex)
         {
-            // Roll the displayed metadata back too. Leaving the previous torrent's tracker/hash/size on
-            // screen next to the new file's path reads as "loaded fine", and Start would then refuse with
-            // a message that contradicts what the panel shows.
+            // Clear metadata when parsing fails, so the displayed fields match the selected file.
             loadedTorrent = null;
+            counterInfoHash = string.Empty;
+            ResetCounters();
             infoHash = [];
             totalLength = 0;
             pieceCount = 0;
             Tracker = string.Empty;
             HashHex = string.Empty;
             TorrentSize = string.Empty;
+            SmallTorrentWarning = false;
             AppendLog("Failed to load torrent: " + ex.Message);
             SetAlert(TabAlertLevel.Error, "Failed to load torrent: " + ex.Message);
         }
@@ -595,6 +722,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     /// <see cref="TorrentFilePath"/> triggers the change hook, which loads the metadata + records the source.</summary>
     public void SetTorrentPath(string path)
     {
+        if (!InputsEnabled) return;
         try
         {
             LastDirectory = Path.GetDirectoryName(path);
@@ -612,6 +740,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     /// materialize a private copy so a restored session can reload it.</summary>
     public void SetTorrentContent(byte[] data, string fileName)
     {
+        if (!InputsEnabled) return;
         // Show the file NAME (not the private cache path). Flag the assignment so the change hook treats it
         // as a load-in-progress, not a clear — we set the authoritative source + load from the bytes AFTER.
         suppressTorrentReset = true;
@@ -693,23 +822,23 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         {
             if (!string.IsNullOrEmpty(torrentSourcePath))
             {
-                InUseCachePaths.Remove(torrentSourcePath);
+                if (InUseCachePaths.TryGetValue(torrentSourcePath, out int count))
+                {
+                    if (count <= 1) InUseCachePaths.Remove(torrentSourcePath);
+                    else InUseCachePaths[torrentSourcePath] = count - 1;
+                }
             }
 
             torrentSourcePath = path;
 
             if (!string.IsNullOrEmpty(path))
             {
-                InUseCachePaths.Add(path);
+                InUseCachePaths[path] = InUseCachePaths.GetValueOrDefault(path) + 1;
             }
         }
     }
 
-    /// <summary>
-    /// Keep the private torrent cache bounded. Every distinct torrent ever picked leaves a copy behind
-    /// (that is the point — a restored tab reloads from it), but nothing deleted them, so the app-private
-    /// directory grew forever. Keep the most recently used ones, and never delete the file we just wrote.
-    /// </summary>
+    /// <summary>Keep the most recent cache entries while protecting files referenced by open tabs.</summary>
     private static void PruneTorrentCache(string dir, string keep)
     {
         const int MaxCachedTorrents = 32;
@@ -729,7 +858,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             HashSet<string> protectedPaths;
             lock (InUseCachePaths)
             {
-                protectedPaths = new HashSet<string>(InUseCachePaths, StringComparer.OrdinalIgnoreCase);
+                protectedPaths = new HashSet<string>(InUseCachePaths.Keys, StringComparer.OrdinalIgnoreCase);
             }
 
             protectedPaths.Add(keep);
@@ -748,70 +877,118 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         }
     }
 
-    public void StopIfRunning()
+    public void StopIfRunning() => _ = StopIfRunningAsync();
+
+    public async Task StopIfRunningAsync()
     {
-        if (IsRunning)
+        if (IsTransitioning) { await pendingStop; return; }
+        if (!IsRunning) { await pendingStop; return; }
+        IsTransitioning = true;
+        try
         {
-            engine.Stop();
+            pendingStop = engine.StopAsync();
+            CaptureFinalStats();
             IsRunning = false;
+            IsPaused = UploadPausedNoLeechers = false;
+            StatusText = "Stopped";
+            TimerText = "stopped";
+            ClearTransientAlert();
+            await pendingStop;
+            CaptureFinalStats();
+            if (engine.StopError.Length > 0) SetAlert(TabAlertLevel.Error, engine.StopError);
         }
+        finally { IsTransitioning = false; }
+    }
+
+    private void ResetCounters()
+    {
+        resumeUploaded = resumeDownloaded = lastUploaded = lastDownloaded = 0;
+        UploadedText = DownloadedText = "0 bytes";
+        RatioText = "0.00";
+        uploadHistory.Reset(0);
+        GraphValues = uploadHistory.Snapshot();
+    }
+
+    private void CaptureFinalStats()
+    {
+        EngineStats stats = engine.GetStats();
+        if (keyIsGenerated && engine.CurrentKey.Length > 0)
+        {
+            assigningIdentity = true;
+            CustomKey = engine.CurrentKey;
+            assigningIdentity = false;
+        }
+        HasFinished = engine.FinishedSuccessfully;
+        resumeUploaded = lastUploaded = stats.Uploaded;
+        resumeDownloaded = lastDownloaded = stats.Downloaded;
+        UploadedText = Format.FileSize(stats.Uploaded);
+        DownloadedText = Format.FileSize(stats.Downloaded);
+        RatioText = stats.Ratio;
+    }
+
+    public void ReleaseResources()
+    {
+        released = true;
+        terminalBuffer.Clear();
+        SetTorrentSource(null);
     }
 
     // ══════════════════════ Session persistence ══════════════════════
-    internal TabState CaptureState() => new()
+    internal TabState CaptureState()
     {
-        TabName = TabName,
-        TorrentFilePath = TorrentFilePath,
-        TorrentSourcePath = torrentSourcePath ?? string.Empty,
-        UploadSpeed = UploadSpeed,
-        RandomUpload = RandomUpload,
-        DownloadSpeed = DownloadSpeed,
-        RandomDownload = RandomDownload,
-        Interval = IntervalText,
-        Finished = FinishedText,
-        StopWhen = SelectedStopWhen,
-        StopValue = StopValue,
-        Family = SelectedFamily,
-        Version = SelectedVersion,
-        CustomKey = CustomKey,
-        CustomPeerId = CustomPeerId,
-        CustomPort = CustomPort,
-        CustomPeers = CustomPeers,
-        AlwaysNewValues = AlwaysNewValues,
-        RealisticMode = RealisticMode,
-        UseTcpListener = UseTcpListener,
-        RequestScrape = RequestScrape,
-        IgnoreFailureReason = IgnoreFailureReason,
-        ProxyType = SelectedProxyType,
-        ProxyHost = ProxyHost,
-        ProxyUser = ProxyUser,
-        ProxyPass = ProxyPass,
-        ProxyPort = ProxyPort,
-        NextRandUp = NextRandUp,
-        NextRandUpMinPercent = NextRandUpMinPercent ?? 50m,
-        NextRandUpMaxPercent = NextRandUpMaxPercent ?? 150m,
-        NextRandDown = NextRandDown,
-        NextRandDownMinPercent = NextRandDownMinPercent ?? 50m,
-        NextRandDownMaxPercent = NextRandDownMaxPercent ?? 150m,
-        EnableLog = EnableLog,
+        EngineStats? current = engine.IsRunning || IsTransitioning ? engine.GetStats() : null;
+        return new()
+        {
+            TabName = TabName,
+            TorrentFilePath = TorrentFilePath,
+            TorrentSourcePath = torrentSourcePath ?? string.Empty,
+            LastDirectory = LastDirectory ?? string.Empty,
+            TorrentHash = counterInfoHash,
+            Tracker = Tracker,
+            UploadSpeed = UploadSpeed,
+            RandomUpload = RandomUpload,
+            DownloadSpeed = DownloadSpeed,
+            RandomDownload = RandomDownload,
+            Interval = IntervalText,
+            Finished = FinishedText,
+            StopWhen = SelectedStopWhen,
+            StopValue = StopValue,
+            Family = SelectedFamily,
+            Version = SelectedVersion,
+            CustomKey = keyIsGenerated && (IsRunning || IsTransitioning) && engine.CurrentKey.Length > 0 ? engine.CurrentKey : CustomKey,
+            KeyIsGenerated = keyIsGenerated,
+            PeerIdIsGenerated = peerIdIsGenerated,
+            CustomPeerId = CustomPeerId,
+            CustomPort = CustomPort,
+            CustomPeers = CustomPeers,
+            RealisticMode = RealisticMode,
+            UseTcpListener = UseTcpListener,
+            RequestScrape = RequestScrape,
+            ProxyType = SelectedProxyType,
+            ProxyHost = ProxyHost,
+            ProxyUser = ProxyUser,
+            ProxyPass = ProxyPass,
+            ProxyPort = ProxyPort,
+            EnableLog = EnableLog,
+            FinishedSuccessfully = HasFinished,
 
-        // Persist whichever counter is authoritative. `last*` only becomes meaningful once the engine has
-        // run (Start seeds it from the resume value and it grows from there); `resume*` holds what was
-        // restored from the previous session and is zeroed once consumed by Start. Saving `last*` alone
-        // meant a tab that was restored but never started wrote 0 back over its own totals on the next
-        // save — silently destroying the accumulated ratio.
-        Uploaded = Math.Max(lastUploaded, resumeUploaded),
-        Downloaded = Math.Max(lastDownloaded, resumeDownloaded),
-    };
+            // Active engines provide current counters; inactive tabs retain their saved resume totals.
+            Uploaded = current?.Uploaded ?? Math.Max(lastUploaded, resumeUploaded),
+            Downloaded = current?.Downloaded ?? Math.Max(lastDownloaded, resumeDownloaded),
+        };
+    }
 
     internal void ApplyState(TabState st)
     {
         TabName = st.TabName;
+        LastDirectory = st.LastDirectory;
 
+        bool knownProfile = ClientCatalog.TryCreate(st.Family, st.Version, out _);
+        string? identityWarning = null;
         suppressVersionReload = true;
-        SelectedFamily = st.Family;
-        LoadVersions(st.Family);
-        SelectedVersion = st.Version;
+        SelectedFamily = knownProfile ? st.Family : ClientCatalog.DefaultFamily;
+        LoadVersions(SelectedFamily);
+        SelectedVersion = knownProfile ? st.Version : ClientCatalog.DefaultVersion;
         suppressVersionReload = false;
 
         UploadSpeed = st.UploadSpeed;
@@ -820,34 +997,38 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         RandomDownload = st.RandomDownload;
         IntervalText = st.Interval;
         FinishedText = st.Finished;
-        SelectedStopWhen = st.StopWhen;
+        SelectedStopWhen = SessionSettings.NormalizeStopCondition(st.StopWhen);
         StopValue = st.StopValue; // override the default the combo change just set
-        AlwaysNewValues = st.AlwaysNewValues;
         RealisticMode = st.RealisticMode;
         UseTcpListener = st.UseTcpListener;
         RequestScrape = st.RequestScrape;
-        IgnoreFailureReason = st.IgnoreFailureReason;
         SelectedProxyType = st.ProxyType;
         ProxyHost = st.ProxyHost;
         ProxyUser = st.ProxyUser;
         ProxyPass = st.ProxyPass;
         ProxyPort = st.ProxyPort;
-        NextRandUp = st.NextRandUp;
-        NextRandUpMinPercent = st.NextRandUpMinPercent;
-        NextRandUpMaxPercent = st.NextRandUpMaxPercent;
-        NextRandDown = st.NextRandDown;
-        NextRandDownMinPercent = st.NextRandDownMinPercent;
-        NextRandDownMaxPercent = st.NextRandDownMaxPercent;
         EnableLog = st.EnableLog;
 
-        // Custom values last so they win over any regeneration triggered above.
+        // Saved identities take precedence over profile defaults; absent provenance remains custom.
+        assigningIdentity = true;
         CustomKey = st.CustomKey;
         CustomPeerId = st.CustomPeerId;
+        keyIsGenerated = st.KeyIsGenerated == true;
+        peerIdIsGenerated = st.PeerIdIsGenerated == true;
+        if (!knownProfile)
+        {
+            ClientProfile replacement = ClientCatalog.Create(SelectedFamily, SelectedVersion);
+            if (keyIsGenerated) CustomKey = replacement.Key;
+            if (peerIdIsGenerated) CustomPeerId = PeerIdentityText.Format(replacement.PeerID);
+            identityWarning = "The saved client profile is unavailable. The default profile was selected; custom identity values were retained.";
+        }
+        else if (st.PeerIdIsGenerated is null && st.Family == "uTorrent"
+            && (st.CustomPeerId.StartsWith("-UT3600-", StringComparison.Ordinal) || st.CustomPeerId.StartsWith("-UT3550-", StringComparison.Ordinal)))
+            identityWarning = "The saved peer ID differs from this profile's build format. It was retained as custom. Use Regenerate to generate this profile's identity.";
+        assigningIdentity = false;
         CustomPort = st.CustomPort;
         CustomPeers = st.CustomPeers;
 
-        resumeUploaded = st.Uploaded;
-        resumeDownloaded = st.Downloaded;
 
         if (!string.IsNullOrWhiteSpace(st.TorrentFilePath))
         {
@@ -864,6 +1045,21 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             SetTorrentSource(st.TorrentSourcePath);
             LoadTorrentMetadata(st.TorrentSourcePath);
         }
+        string identity = loadedTorrent is not null ? Format.ToHex(infoHash) : st.TorrentHash;
+        bool matches = st.TorrentHash.Length == 0 || string.Equals(identity, st.TorrentHash, StringComparison.OrdinalIgnoreCase);
+        if (matches && identity.Length > 0)
+        {
+            counterInfoHash = identity;
+            resumeUploaded = lastUploaded = Math.Max(0, st.Uploaded);
+            resumeDownloaded = lastDownloaded = Math.Max(0, st.Downloaded);
+            UploadedText = Format.FileSize(lastUploaded);
+            DownloadedText = Format.FileSize(lastDownloaded);
+        }
+        else ResetCounters();
+        if (matches && !string.IsNullOrWhiteSpace(st.Tracker)) Tracker = st.Tracker;
+        RatioText = lastDownloaded > 0 ? (lastUploaded / (double)lastDownloaded).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) : "0.00";
+        HasFinished = matches && loadedTorrent is not null && st.FinishedSuccessfully;
+        if (identityWarning is not null) SetAlert(TabAlertLevel.Warning, identityWarning);
     }
 
     // ══════════════════════ Engine callbacks (already on UI thread) ══════════════════════
@@ -872,7 +1068,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         // A Stats event queued just before a manual Stop must not run after OnEngineStopped and rewrite the
         // "stopped" UI back to "Seeding…". IsRunning is set true before the engine's first EmitStats, so no
         // legitimate update is dropped.
-        if (!IsRunning)
+        if (!IsRunning || !s.IsActive)
         {
             return;
         }
@@ -892,49 +1088,50 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
         TotalTimeText = Format.Time(s.TotalRunSeconds);
         TimerText = Format.Time(s.IntervalRemaining);
+        NextUpdateCountdown = Format.Countdown(s.IntervalRemaining);
+        ApplyEngineAlert(s.AlertLevel, s.AlertMessage);
 
-        // Status hint while idling between (jittered) announces.
-        StatusText = s.IntervalRemaining > 0
-            ? $"Seeding — next announce in {Format.Time(s.IntervalRemaining)} (jittered)"
-            : "Announcing…";
+        IsPaused = s.IsPaused;
+        UploadPausedNoLeechers = s.UploadPausedNoLeechers;
+        IsAnnouncing = s.IsAnnouncing;
+        StatusText = IsPaused ? "Paused by you" : UploadPausedNoLeechers ? "Upload paused: no leechers"
+            : IsAnnouncing ? "Announcing…" : s.SeedMode ? "Seeding" : "Downloading";
 
-        // Push instantaneous upload rate (bytes/s) into the live graph.
-        long delta = s.Uploaded - lastUploaded;
         lastUploaded = s.Uploaded;
         lastDownloaded = s.Downloaded;
-        if (delta < 0)
-        {
-            delta = 0;
-        }
-
-        Array.Copy(uploadGraph, 1, uploadGraph, 0, GraphPoints - 1);
-        uploadGraph[GraphPoints - 1] = delta;
-        GraphValues = (double[])uploadGraph.Clone();
+        if (uploadHistory.Sample(s.Uploaded, s.SampleElapsedSeconds)) GraphValues = uploadHistory.Snapshot();
     }
 
-    private void OnEngineStopped(string reason)
+    private async Task OnEngineStoppedAsync(string reason)
     {
+        bool wasStopping = IsTransitioning;
+        IsTransitioning = true;
+        CaptureFinalStats();
         IsRunning = false;
+        IsPaused = UploadPausedNoLeechers = false;
         StatusText = reason;
         TimerText = "stopped";
-        ClearTransientAlert();
-
-        // Anything other than a plain user Stop is worth a toast (stop condition / error).
-        if (!reason.Equals("stopped", StringComparison.OrdinalIgnoreCase))
+        if (reason.Contains("error", StringComparison.OrdinalIgnoreCase) || reason.Contains("rejection", StringComparison.OrdinalIgnoreCase))
+            SetAlert(TabAlertLevel.Error, reason);
+        else ClearTransientAlert();
+        if (wasStopping) return;
+        try
         {
-            NotificationHub.Show(TabName, reason, reason.Contains("error", StringComparison.OrdinalIgnoreCase));
+            pendingStop = engine.StopAsync(); await pendingStop;
+            CaptureFinalStats();
+            if (engine.StopError.Length > 0) SetAlert(TabAlertLevel.Error, engine.StopError);
         }
+        finally { IsTransitioning = false; }
+        if (!reason.Equals("stopped", StringComparison.OrdinalIgnoreCase))
+            NotificationHub.Show(TabName, reason, reason.Contains("error", StringComparison.OrdinalIgnoreCase));
     }
-
-    // Cap the log buffer (~100 KB) so a long-running session can't grow LogText without bound.
-    private const int LogCap = 100_000;
 
     private void AppendLog(string line)
     {
         // Surface tracker errors as a toast even if the log is disabled.
         if (line.StartsWith("Tracker Error:", StringComparison.OrdinalIgnoreCase))
         {
-            NotificationHub.Show(TabName + " — tracker error", line, error: true);
+            Post(() => NotificationHub.Show(TabName + " — tracker error", line, error: true));
         }
 
         if (!EnableLog)
@@ -942,16 +1139,9 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             return;
         }
 
-        string stamp = DateTime.Now.ToString("HH:mm:ss");
-        LogText += $"[{stamp}] {line}\n";
-
-        // Bound the buffer so a multi-day session can't grow LogText without limit (O(n^2) reallocation +
-        // an ever-larger bound TextBox). Keep roughly the last LogCap chars, trimmed at a line boundary.
-        if (LogText.Length > LogCap)
-        {
-            int cut = LogText.IndexOf('\n', LogText.Length - LogCap);
-            LogText = cut >= 0 ? LogText[(cut + 1)..] : LogText[^LogCap..];
-        }
+        string stamp = DateTime.Now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        if (terminalBuffer.Enqueue($"[{stamp}] {line}\n"))
+            Post(() => { if (!released) LogText = terminalBuffer.Drain(LogText); });
     }
 
     private static void Post(Action action) => Dispatcher.UIThread.Post(action);
@@ -1025,8 +1215,23 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     }
 
     // ══════════════════════ Change hooks ══════════════════════
+    partial void OnCustomKeyChanged(string value)
+    {
+        if (!assigningIdentity) keyIsGenerated = false;
+    }
+
+    partial void OnStopValueChanged(string value) => UpdateStopCondition();
+
+    private void UpdateStopCondition() => Volatile.Write(ref stopCondition, new StopConditionSettings(SelectedStopWhen, StopValue));
+
+    partial void OnCustomPeerIdChanged(string value)
+    {
+        if (!assigningIdentity) peerIdIsGenerated = false;
+    }
+
     partial void OnTorrentFilePathChanged(string value)
     {
+        HasFinished = false;
         if (!string.IsNullOrWhiteSpace(value)
             && value.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase)
             && File.Exists(value))
@@ -1048,56 +1253,42 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             return;
         }
 
-        // The box no longer names a loadable torrent (emptied, or an invalid/removed path). Drop the loaded
-        // torrent + its persisted source so a removed torrent isn't silently resurrected on the next launch.
+        // Clearing the path also clears the source and displayed torrent metadata.
         SetTorrentSource(null);
         loadedTorrent = null;
+        counterInfoHash = string.Empty;
+        ResetCounters();
         infoHash = [];
         Tracker = string.Empty;
         HashHex = string.Empty;
         TorrentSize = string.Empty;
+        SmallTorrentWarning = false;
     }
 
     partial void OnIsRunningChanged(bool value)
     {
-        // Drives the Android foreground service (no-op on desktop): without it a backgrounded session is
-        // throttled by Doze and eventually killed with the process.
-        if (value)
-        {
-            SessionActivity.Entered();
-        }
-        else
-        {
-            SessionActivity.Exited();
-        }
-
+        if (value) HasFinished = false;
+        else { ManualUpdatePending = false; IsPaused = UploadPausedNoLeechers = IsAnnouncing = false; }
         RaisePulse();
-        OnPropertyChanged(nameof(InputsEnabled));
-        OnPropertyChanged(nameof(DotState)); // idle ⇄ running changes the dot when there's no alert
-        StartCommand.NotifyCanExecuteChanged();
-        StopCommand.NotifyCanExecuteChanged();
-        ManualUpdateCommand.NotifyCanExecuteChanged();
-        SetDefaultsCommand.NotifyCanExecuteChanged();
+        NotifySessionState();
     }
 
     partial void OnStopUnitChanged(string value) => OnPropertyChanged(nameof(StopUnitVisible));
 
     partial void OnSelectedFamilyChanged(string value)
     {
+        if (suppressVersionReload) return;
         suppressVersionReload = true;
         LoadVersions(value);
         SelectedVersion = Versions.Count > 0 ? Versions[0] : string.Empty;
         suppressVersionReload = false;
-        if (AlwaysNewValues)
-        {
-            CustomPort = string.Empty;
-            RegenerateValues();
-        }
+        CustomPort = string.Empty;
+        RegenerateValues();
     }
 
     partial void OnSelectedVersionChanged(string value)
     {
-        if (!suppressVersionReload && AlwaysNewValues && !string.IsNullOrEmpty(value))
+        if (!suppressVersionReload && !string.IsNullOrEmpty(value))
         {
             RegenerateValues();
         }
@@ -1112,6 +1303,11 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
                 StopValueVisible = true;
                 StopUnit = "ratio";
                 break;
+            case "When leechers / seeders <":
+                StopValue = "1.0";
+                StopValueVisible = true;
+                StopUnit = "ratio";
+                break;
             case "After time:":
                 StopValue = "3600";
                 StopValueVisible = true;
@@ -1123,11 +1319,11 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
                 StopValueVisible = true;
                 StopUnit = string.Empty;
                 break;
-            case "When uploaded >":
-            case "When downloaded >":
+            case "When upload >":
+            case "When download >":
                 StopValue = "1000";
                 StopValueVisible = true;
-                StopUnit = "GB";
+                StopUnit = "GiB";
                 break;
             default:
                 StopValue = string.Empty;
@@ -1137,6 +1333,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         }
 
         RaisePulse(); // StopValueVisible affects StopValuePulsing
+        UpdateStopCondition();
     }
 }
 
