@@ -3,15 +3,14 @@
           package="net.ratiomaster.app">
   <!-- versionCode/versionName are injected by build_RatioMaster_setup.bat (-p:ApplicationVersion /
        -p:ApplicationDisplayVersion) so the APK version tracks the Windows/Linux builds. -->
-  <!-- minSdk 24 (Android 7.0) = the practical Avalonia floor (gates which devices can INSTALL).
-       targetSdk = the newest STABLE Android API the build machine has installed; the bat re-asserts it
-       per build. Bump when Google raises the Play target-API floor (~yearly). -->
-  <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+  <!-- The SDK generates minSdkVersion from SupportedOSPlatformVersion and targetSdkVersion
+       from TargetFramework, keeping command-line and packaged builds consistent. -->
 
   <!-- Raw-socket tracker announces + scrape over LAN/Internet → INTERNET. ACCESS_NETWORK_STATE lets
        the app react to connectivity changes. -->
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
   <!-- Foreground-service status and notifications for active sessions, including paused sessions.
        Android may still restrict background networking or stop the process. -->

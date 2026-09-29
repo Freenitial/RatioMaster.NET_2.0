@@ -1,8 +1,11 @@
 namespace RatioMaster.Engine;
 
-using System.Collections.Generic;
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
+using RatioMaster.BitTorrent;
 
 internal sealed class Peer
 {
@@ -50,24 +53,37 @@ internal sealed class Peer
         PeerID.Length > 0 ? $"{Address}(PeerID={PeerID})" : Address;
 }
 
-internal sealed class PeerList : List<Peer>
+internal static class PeerList
 {
     private const int MaxPeersToShow = 5;
 
-    public override string ToString()
+    internal static string FormatCompact(byte[] bytes, int addressBytes)
     {
-        string result = $"({Count}) ";
-        int counter = 0;
-        foreach (Peer peer in this)
+        if (addressBytes is not (4 or 16)) throw new ArgumentOutOfRangeException(nameof(addressBytes));
+        int stride = addressBytes + 2;
+        int count = bytes.Length / stride;
+        StringBuilder result = Prefix(count);
+        for (int index = 0; index < Math.Min(count, MaxPeersToShow); index++)
         {
-            if (counter < MaxPeersToShow)
-            {
-                result += peer + ";";
-            }
-
-            counter++;
+            int offset = index * stride;
+            Peer peer = new(bytes.AsSpan(offset, addressBytes).ToArray(),
+                BinaryPrimitives.ReadUInt16BigEndian(bytes.AsSpan(offset + addressBytes, 2)));
+            result.Append(peer).Append(';');
         }
-
-        return result;
+        return result.ToString();
     }
+
+    internal static string FormatDictionary(ValueList peers)
+    {
+        int count = peers.values.Count(value => value is ValueDictionary);
+        StringBuilder result = Prefix(count);
+        foreach (ValueDictionary peer in peers.values.OfType<ValueDictionary>().Take(MaxPeersToShow))
+        {
+            result.Append(new Peer(BEncode.String(peer["ip"]) ?? string.Empty,
+                BEncode.String(peer["port"]) ?? "0", BEncode.String(peer["peer id"]) ?? string.Empty)).Append(';');
+        }
+        return result.ToString();
+    }
+
+    private static StringBuilder Prefix(int count) => new("(" + count.ToString(CultureInfo.InvariantCulture) + ") ");
 }

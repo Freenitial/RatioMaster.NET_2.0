@@ -3,6 +3,7 @@ namespace RatioMaster.BitTorrent;
 using System;
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Text;
 
@@ -84,7 +85,7 @@ internal sealed class ValueString : IBEncodeValue
 
     public byte[] Encode()
     {
-        byte[] prefix = Enc.GetBytes(v.Length.ToString() + ":");
+        byte[] prefix = Enc.GetBytes(data.Length.ToString(CultureInfo.InvariantCulture) + ":");
         byte[] result = new byte[prefix.Length + data.Length];
         Buffer.BlockCopy(prefix, 0, result, 0, prefix.Length);
         Buffer.BlockCopy(data, 0, result, prefix.Length, data.Length);
@@ -107,7 +108,8 @@ internal sealed class ValueString : IBEncodeValue
         byte current;
         while ((current = BEncode.ReadByteChecked(s)) != (byte)':')
         {
-            if (current < (byte)'0' || current > (byte)'9' || length > BEncode.MaxStringBytes / 10)
+            if (firstByte == (byte)'0' || current < (byte)'0' || current > (byte)'9'
+                || length > (BEncode.MaxStringBytes - (current - '0')) / 10)
                 throw new TorrentException("Invalid or excessive string length.");
             length = checked(length * 10 + current - '0');
         }
@@ -150,8 +152,8 @@ internal sealed class ValueNumber : IBEncodeValue
 
     internal long Integer
     {
-        get => long.Parse(v);
-        set => String = value.ToString();
+        get => long.Parse(v, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        set => String = value.ToString(CultureInfo.InvariantCulture);
     }
 
     public byte[] Encode()
@@ -163,7 +165,7 @@ internal sealed class ValueNumber : IBEncodeValue
         return result;
     }
 
-    internal ValueNumber(long number) => String = number.ToString();
+    internal ValueNumber(long number) => Integer = number;
 
     internal ValueNumber()
     {
@@ -181,18 +183,24 @@ internal sealed class ValueNumber : IBEncodeValue
             current = (char)BEncode.ReadByteChecked(s);
         }
 
-        String = long.Parse(buffer).ToString();
+        ReadOnlySpan<char> digits = buffer.AsSpan();
+        bool negative = digits.Length > 0 && digits[0] == '-';
+        if (negative) digits = digits[1..];
+        if (digits.Length == 0 || (digits[0] == '0' && (digits.Length != 1 || negative))
+            || !long.TryParse(buffer, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long number))
+            throw new TorrentException("Invalid or excessive bencoded integer.");
+        Integer = number;
     }
 }
 
 internal static class BEncode
 {
     internal const int MaxStringBytes = 8 * 1024 * 1024;
+    internal const int MaxNodes = 262144;
     [ThreadStatic] private static int nesting;
-    // Read one byte or throw on end-of-stream. Stream.ReadByte() returns -1 at EOF; casting that
-    // straight to char yields U+FFFF (and to byte yields 255), neither of which matches a bencode
-    // terminator ('e' / ':') — so a truncated payload would otherwise spin the parse loops forever,
-    // appending the sentinel and growing memory without bound. This turns truncation into a clean throw.
+    [ThreadStatic] private static int nodes;
+
+    // EOF is distinct from every byte value and must terminate an incomplete bencoded value.
     internal static byte ReadByteChecked(Stream s)
     {
         int b = s.ReadByte();
@@ -215,9 +223,11 @@ internal static class BEncode
 
     internal static IBEncodeValue Parse(Stream d, byte firstByte)
     {
+        if (nesting == 0) nodes = 0;
         if (++nesting > 64) { nesting--; throw new TorrentException("Bencoded data is nested too deeply."); }
         try
         {
+            CountNode();
             char first = (char)firstByte;
             IBEncodeValue v = first switch
             {
@@ -239,5 +249,10 @@ internal static class BEncode
             return v;
         }
         finally { nesting--; }
+    }
+
+    internal static void CountNode()
+    {
+        if (++nodes > MaxNodes) throw new TorrentException("Bencoded data exceeds the node limit.");
     }
 }

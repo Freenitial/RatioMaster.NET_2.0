@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-22.04, macos-latest]
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
@@ -44,15 +44,67 @@ jobs:
 
       - name: Build and run protocol, state and headless UI checks
         shell: pwsh
-        run: ./Installer/validate_RatioMaster.ps1
+        run: ./Installer/Scripts/validate_RatioMaster.ps1
 
       - name: Verify macOS packaging script syntax
         if: runner.os != 'Windows'
         shell: bash
-        run: bash -n Installer/package_macos.sh
+        run: bash -n Installer/Scripts/package_macos.sh
+
+      - name: Verify Windows process runner and compiler selection
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./Installer/Tests/Test_RatioMasterBuilder.ps1
+          ./Installer/Tests/Test_LinuxArchive.ps1
 
       - name: Build the local macOS application bundle
         if: runner.os == 'macOS'
         shell: bash
-        run: bash Installer/package_macos.sh
+        run: bash Installer/Scripts/package_macos.sh
+
+  linux-package:
+    name: AppImage (${{ matrix.rid }}, Ubuntu 22.04)
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            rid: linux-x64
+          - runner: ubuntu-22.04-arm
+            rid: linux-arm64
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install Ubuntu 22.04 native prerequisites
+        run: |
+          apt-get update
+          apt-get install --yes ca-certificates curl git clang zlib1g-dev libicu70 libfontconfig1 libfreetype6 libx11-6 libice6 libsm6 desktop-file-utils python3 xvfb x11-utils
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the repository SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: global.json
+
+      - name: Verify ELF compatibility and launcher regression checks
+        shell: bash
+        run: bash Installer/Tests/Test_LinuxPackaging.sh
+
+      - name: Build and smoke-test the AppImage on its minimum Linux baseline
+        shell: bash
+        run: bash Installer/Scripts/package_linux.sh '${{ matrix.rid }}'
+
+      - name: Verify the AppImage displays its main window
+        shell: bash
+        run: python3 Installer/Tests/Test_LinuxWindow.py Installer/Output/*.AppImage
 

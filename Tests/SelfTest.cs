@@ -6,9 +6,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using RatioMaster.BitTorrent;
 using RatioMaster.Engine;
 using RatioMaster.Models;
@@ -26,7 +28,9 @@ internal static class SelfTest
 
     internal static int Run()
     {
-        const int port = 8791;
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         List<string> log = [];
         void Log(string s)
         {
@@ -41,51 +45,39 @@ internal static class SelfTest
         // 1. Build a minimal single-file .torrent pointing at our local tracker.
         string tracker = $"http://127.0.0.1:{port}/announce";
         byte[] torrentBytes = BuildTorrent(tracker, "selftest.bin", 4 * 1024 * 1024);
-        string path = Path.Combine(Path.GetTempPath(), "ratiomaster_selftest.torrent");
-        File.WriteAllBytes(path, torrentBytes);
-
-        Torrent torrent = new(path);
+        using MemoryStream torrentStream = new(torrentBytes);
+        Torrent torrent = new(torrentStream);
         byte[] infoHash = torrent.InfoHash;
         Console.WriteLine($"Torrent parsed: name={torrent.Name} announce={torrent.Announce} size={torrent.TotalLength} hash={Convert.ToHexString(infoHash)}");
 
         // 2. Local tracker that answers announce + scrape with valid bencode.
-        using HttpListener listener = new();
-        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-        listener.Start();
-        bool serving = true;
+        using CancellationTokenSource serving = new();
         int announceRequests = 0;
         using ManualResetEventSlim manualAnnounced = new();
-        Thread server = new(() =>
+        Task server = Task.Run(async () =>
         {
-            while (serving)
+            try
             {
-                HttpListenerContext ctx;
-                try
+                while (!serving.IsCancellationRequested)
                 {
-                    ctx = listener.GetContext();
-                }
-                catch
-                {
-                    return;
-                }
-
-                if (ctx.Request.Url!.AbsolutePath.Contains("announce")) Interlocked.Increment(ref announceRequests);
-                byte[] body = ctx.Request.Url!.AbsolutePath.Contains("scrape")
-                    ? ScrapeResponse(infoHash)
-                    : AnnounceResponse();
-                ctx.Response.StatusCode = 200;
-                ctx.Response.ContentType = "text/plain";
-                ctx.Response.ContentLength64 = body.Length;
-                ctx.Response.OutputStream.Write(body, 0, body.Length);
-                ctx.Response.OutputStream.Close();
-                if (ctx.Request.Url!.AbsolutePath.Contains("announce") && ctx.Request.QueryString["event"] is null)
-                {
-                    manualAnnounced.Set();
+                    using TcpClient peer = await listener.AcceptTcpClientAsync(serving.Token);
+                    using NetworkStream stream = peer.GetStream();
+                    using StreamReader reader = new(stream, Encoding.ASCII, leaveOpen: true);
+                    string request = await reader.ReadLineAsync(serving.Token)
+                        ?? throw new IOException("The fixture received no HTTP request line.");
+                    while (await reader.ReadLineAsync(serving.Token) is { Length: > 0 }) { }
+                    bool announce = request.StartsWith("GET /announce?", StringComparison.Ordinal);
+                    if (announce) Interlocked.Increment(ref announceRequests);
+                    byte[] body = announce ? AnnounceResponse() : ScrapeResponse(infoHash);
+                    byte[] headers = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(headers, serving.Token);
+                    await stream.WriteAsync(body, serving.Token);
+                    if (announce && !request.Contains("&event=", StringComparison.Ordinal)) manualAnnounced.Set();
                 }
             }
-        })
-        { IsBackground = true };
-        server.Start();
+            catch (OperationCanceledException) when (serving.IsCancellationRequested) { }
+            catch (SocketException) when (serving.IsCancellationRequested) { }
+        });
 
         // 3. Drive the real engine.
         StubHost host = new();
@@ -115,15 +107,26 @@ internal static class SelfTest
             NumWant = "200",
         };
 
-        engine.Start(cfg);
-        progressed.Wait(TimeSpan.FromSeconds(5));
-        EngineStats? scheduled = last;
-        engine.ManualUpdate();
-        bool manualSent = manualAnnounced.Wait(TimeSpan.FromSeconds(5));
-        engine.StopAsync().GetAwaiter().GetResult();
-        serving = false;
-        listener.Stop();
-        server.Join(TimeSpan.FromSeconds(5));
+        EngineStats? scheduled;
+        bool manualSent;
+        try
+        {
+            engine.Start(cfg);
+            progressed.Wait(TimeSpan.FromSeconds(5));
+            scheduled = last;
+            engine.ManualUpdate();
+            manualSent = manualAnnounced.Wait(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            try { engine.StopAsync().GetAwaiter().GetResult(); }
+            finally
+            {
+                serving.Cancel();
+                listener.Stop();
+                server.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            }
+        }
 
         // 4. Assertions.
         string joined = string.Join("\n", log);
@@ -141,7 +144,7 @@ internal static class SelfTest
         bool noProcessError = !joined.Contains("process found") && !joined.Contains("client is running");
 
         // BEP 7 IPv6: the compact 18-byte record must decode to a bracketed address with a big-endian port
-        // (a byte-swapped port would read 57626, the classic bug this pins down).
+        // (a byte-swapped port would read 57626).
         bool gotPeers6 = joined.Contains("peers6:") && joined.Contains("[2001:db8::1]:6881");
 
         // Tracker health and swarm counters use separate UI fields.
@@ -155,6 +158,7 @@ internal static class SelfTest
         bool bencodeBounds = BencodeBounds();
         bool lifecycleValid = EngineLifecycleSelfTest.RunAsync().GetAwaiter().GetResult();
         bool persistenceValid = PersistenceSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool networkPermissionValid = SessionNetworkSelfTest.RunAsync().GetAwaiter().GetResult();
         bool networkValid = NetworkTransportSelfTest.Run() == 0;
 
         Console.WriteLine();
@@ -176,7 +180,8 @@ internal static class SelfTest
         bool pass = connected && gotPeers && gotPeers6 && intervalUpdated && uploadedGrew && alerted
             && legacySession && profilesValid && noProcessError
             && countdownUpdated && sizeWarning && countdownFormat && manualSent
-            && udpValid && formatsValid && statesValid && bencodeBounds && lifecycleValid && persistenceValid && networkValid;
+            && udpValid && formatsValid && statesValid && bencodeBounds && lifecycleValid && persistenceValid
+            && networkPermissionValid && networkValid;
         Console.WriteLine();
         Console.WriteLine(pass ? "✅ SELF-TEST PASSED" : "❌ SELF-TEST FAILED");
         return pass ? 0 : 1;
@@ -223,7 +228,7 @@ internal static class SelfTest
         }
         catch
         {
-            return false; // an exception here means an upgrade wipes the user's tabs
+            return false; // The saved tab must remain readable.
         }
     }
 
@@ -286,13 +291,12 @@ internal static class SelfTest
 
         public long DownloadRateBytes => 0;
 
-        // Flat, exact rate: the assertion below checks an EXACT byte count, which a smooth-curve
-        // multiplier (×0.55…1.15) would make non-deterministic.
+        // A fixed positive rate makes upload progress independent of randomized samples.
         public bool RandomUploadEnabled => false;
 
         public bool RandomDownloadEnabled => false;
 
-        // Off too, so the asserted byte count stays exact.
+        // Stop is controlled explicitly by the fixture.
         public string StopWhen => "Never";
 
         public string StopValue => string.Empty;

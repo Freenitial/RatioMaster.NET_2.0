@@ -1,4 +1,4 @@
-<# :
+﻿<# :
     @echo off & Title RatioMaster.NET Packing
     setlocal
     set "RM_BAT_ARGS=%*"
@@ -26,7 +26,7 @@
         "if((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)){exit 0};" ^
         "$reasons=@();" ^
         "$aa=[string]$env:RM_BAT_ARGS; $sAot=$aa -match '(?i)--aot\b'; $sWx=$aa -match '(?i)--winx64\b'; $sWa=$aa -match '(?i)--winarm64\b'; $sLx=$aa -match '(?i)--linux\b'; $sAk=$aa -match '(?i)--apk\b'; $sAb=$aa -match '(?i)--aab\b'; $any=$sAot -or $sWx -or $sWa -or $sLx -or $sAk -or $sAb; $needWin=(-not $any) -or $sAot -or $sWx -or $sWa; $needArm=(-not $any) -or $sWa; $needAndroid=(-not $any) -or $sAk -or $sAb;" ^
-        "foreach($d in @((Join-Path $root 'RatioMaster.App\publish'),(Split-Path -Parent $bat),(Join-Path (Split-Path -Parent $bat) 'Output'),(Join-Path (Split-Path -Parent $bat) 'Data'))){try{New-Item -ItemType Directory -Force -Path $d | Out-Null; $t=Join-Path $d ('.w_'+[guid]::NewGuid().ToString('N')); [IO.File]::WriteAllText($t,'x'); Remove-Item $t -Force}catch{$reasons+=('output folder not writable: '+$d)}};" ^
+        "foreach($d in @((Join-Path $root 'artifacts\publish'),(Join-Path $root 'artifacts\logs\build'),(Join-Path $root 'artifacts\cache'),(Split-Path -Parent $bat),(Join-Path (Split-Path -Parent $bat) 'Output'),(Join-Path (Split-Path -Parent $bat) 'Data'))){try{New-Item -ItemType Directory -Force -Path $d | Out-Null; $t=Join-Path $d ('.w_'+[guid]::NewGuid().ToString('N')); [IO.File]::WriteAllText($t,'x'); Remove-Item $t -Force}catch{$reasons+=('output folder not writable: '+$d)}};" ^
         "$net11=$false; try{$net11=((dotnet --list-sdks 2>&1 | Out-String) -match '(?im)^\s*11\.0\.')}catch{}; if(-not $net11){$reasons+='.NET 11 SDK not installed'};" ^
         "$vcx64=[bool](Get-ChildItem @((Join-Path $env:ProgramFiles 'Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe'),(Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe')) -EA SilentlyContinue); $winsdk=[bool](Get-ChildItem @((Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib\*\um\x64\kernel32.lib'),(Join-Path $env:ProgramFiles 'Windows Kits\10\Lib\*\um\x64\kernel32.lib')) -EA SilentlyContinue); if($needWin -and -not ($vcx64 -and $winsdk)){$reasons+='MSVC x64 C++ build tools / Windows SDK not installed (REQUIRED for the win-x64 Native-AOT single file)'};" ^
         "$vcarm=[bool](Get-ChildItem @((Join-Path $env:ProgramFiles 'Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\arm64\link.exe'),(Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\arm64\link.exe')) -EA SilentlyContinue); if($needArm -and -not $vcarm){$reasons+='MSVC ARM64 build tools not installed (for the win-arm64 AOT)'};" ^
@@ -85,7 +85,7 @@
     exit /b %ERRORLEVEL%
     :runHeadless
     set "RM_BUILD_HEADLESS=1"
-    powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0Invoke_RatioMasterBuilder.ps1" -BuilderPath "%~f0"
+    powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0Scripts\Invoke_RatioMasterBuilder.ps1" -BuilderPath "%~f0"
     exit /b %ERRORLEVEL%
 #>
 
@@ -121,11 +121,17 @@ try {
     }
 } catch { $script:BuildMutex = $null }
 
+$logDir = Join-Path (Split-Path -Parent (Split-Path -Parent $batFile)) 'artifacts\logs\build'
 $buildLog = $null
 try {
-    $buildLog = Join-Path (Split-Path -Parent $batFile) 'build-ratiomaster.log'
-    if ($env:RM_BAT_ARGS -match '(?i)--rm-elevated') { [IO.File]::AppendAllText($buildLog, "---- relaunched elevated; continuing ----`r`n") }
-    else { [IO.File]::WriteAllText($buildLog, "==== RatioMaster.NET build $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) ====`r`n") }
+    [IO.Directory]::CreateDirectory($logDir) | Out-Null
+    $buildLog = Join-Path $logDir 'build-ratiomaster.log'
+    if ($env:RM_BAT_ARGS -match '(?i)--rm-elevated') {
+        [IO.File]::AppendAllText($buildLog, "---- relaunched elevated; continuing ----`r`n")
+    }
+    else {
+        [IO.File]::WriteAllText($buildLog, "==== RatioMaster.NET build $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) ====`r`n")
+    }
 } catch { $buildLog = $null }
 function Log([string]$m) { if ($null -eq $m) { return }; Write-Host $m; if ($buildLog) { try { [IO.File]::AppendAllText($buildLog, $m + "`r`n") } catch {} } }
 trap {
@@ -307,23 +313,20 @@ function Invoke-Stage([string]$exe, [object[]]$argList, [int]$from, [int]$to, [s
 }
 function Tail([string]$log,[int]$n = 25) { $t = Read-TextRobust $log; if (-not $t) { return '' }; (($t -split "`r?`n") | Select-Object -Last $n) -join "`r`n" }
 
-# ── layout: <repo>\Installer\{build_RatioMaster_setup.bat, Data\, Output\} ; repo root = one up ──
+# ── Installer holds packaging sources and final packages; artifacts holds generated build files. ──
 $root    = Split-Path -Parent (Split-Path -Parent $batFile)
 $batDir  = Split-Path -Parent $batFile
+$scriptDir = Join-Path $batDir 'Scripts'
 $dataDir = Join-Path $batDir 'Data'
+$cacheDir = Join-Path $root 'artifacts\cache'
 $outDir  = Join-Path $batDir 'Output'
 $appDir  = Join-Path $root 'RatioMaster.App'
 $proj    = Join-Path $appDir 'RatioMaster.App.csproj'
-$pub      = Join-Path $appDir 'publish\win-x64'
-$pubArm   = Join-Path $appDir 'publish\win-arm64'
-$linux    = Join-Path $appDir 'publish\linux-x64'
-$linuxArm = Join-Path $appDir 'publish\linux-arm64'
-$appRun   = Join-Path $dataDir 'AppRun'
-$desktop  = Join-Path $dataDir 'RatioMaster.desktop'
-$iconPng  = Join-Path $root 'icon.png'
-$shFile   = Join-Path $dataDir 'rm_linux_aot.sh'
-$wrapFile = Join-Path $dataDir 'aarch64-aot-ld'
-$stamp    = Join-Path $dataDir 'last_update_check.txt'
+Set-Location -LiteralPath $root
+$publishRoot = Join-Path $root 'artifacts\publish'
+$pub      = Join-Path $publishRoot 'win-x64'
+$pubArm   = Join-Path $publishRoot 'win-arm64'
+$stamp    = Join-Path $cacheDir 'last_update_check.txt'
 
 $argStr    = [string]$env:RM_BAT_ARGS
 $selAot    = [bool]($argStr -match '(?i)--aot\b')        # bare win-x64 AOT publish, no packaging
@@ -359,7 +362,7 @@ Log ("[setup] selected targets: " + ($selectedTargets -join ', '))
 $dotnet = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
 $built  = [ordered]@{}
 $tools  = [ordered]@{}
-New-Item -ItemType Directory -Force -Path $dataDir, $outDir | Out-Null
+New-Item -ItemType Directory -Force -Path $dataDir, $outDir, $logDir, $cacheDir | Out-Null
 
 # ── helpers ──
 function Have-Cmd([string]$n) { [bool](Get-Command $n -ErrorAction SilentlyContinue) }
@@ -384,7 +387,7 @@ function Ensure-Winget([string]$id,[int]$from,[int]$to,[string]$label) {
     }
     if (-not (Have-Cmd 'winget')) { $tools[$label] = 'SKIPPED - winget not available; install manually'; return $false }
     $present = Winget-Present $id
-    $log = Join-Path $env:TEMP ("rm_wg_" + ($id -replace '[^\w]','_') + ".log")
+    $log = Join-Path $logDir ("rm_wg_" + ($id -replace '[^\w]','_') + ".log")
     $wgVerb = 'install'
     if ($present) {
         $wgVerb = 'upgrade'
@@ -401,7 +404,18 @@ function Ensure-Winget([string]$id,[int]$from,[int]$to,[string]$label) {
     }
     return $ok
 }
-function Net11Ver { try { return (((& dotnet --list-sdks) 2>&1) | ForEach-Object { if ($_ -match '^(11\.0\.\d\S*)') { $Matches[1] } } | Select-Object -First 1) } catch { return $null } }
+function Net11Ver {
+    try {
+        $version = (& dotnet --version 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $version -match '^11\.0\.\d\S*$') {
+            return $version
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
 function Wg-Exists([string]$id) { if (-not (Have-Cmd 'winget')) { return $false }; try { & winget show --id $id -e --disable-interactivity --accept-source-agreements *> $null; return ($LASTEXITCODE -eq 0) } catch { return $false } }
 function Ensure-Dotnet11 {
     Refresh-Path
@@ -413,7 +427,7 @@ function Ensure-Dotnet11 {
         $tools['.NET 11 SDK'] = "present ($installedVersion)"
         return (Get-Command dotnet).Source
     }
-    if ((-not (Net11Ver)) -or $daily) {
+    if (-not (Net11Ver)) {
         Update-LoadingPopup 4 "Checking .NET 11 SDK..."
         $id = 'Microsoft.DotNet.SDK.Preview'
         if (Wg-Exists 'Microsoft.DotNet.SDK.11') {
@@ -422,8 +436,16 @@ function Ensure-Dotnet11 {
         Ensure-Winget $id 3 6 ".NET 11 SDK" | Out-Null; Refresh-Path
     } else { $tools['.NET 11 SDK'] = "present ($(Net11Ver))" }
     $dn = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
-    if (-not (Net11Ver) -and -not $dn) { Fail("No .NET SDK found and the automatic install failed.`r`nInstall the .NET 11 SDK, then re-run.") }
+    if (-not (Net11Ver) -or -not $dn) {
+        Fail('The installed SDK cannot satisfy global.json. Install its .NET 11 SDK version, then re-run.')
+    }
     return $dn
+}
+function Get-LinuxBuildDistribution {
+    if (-not [string]::IsNullOrWhiteSpace($env:RM_WSL_DISTRO)) {
+        return $env:RM_WSL_DISTRO
+    }
+    return 'Ubuntu-22.04'
 }
 function Wsl-Ready {
     try {
@@ -431,7 +453,8 @@ function Wsl-Ready {
         if ($null -eq $wslCommand) {
             return $false
         }
-        & $wslCommand.Source --exec /bin/true *> $null
+        $distribution = Get-LinuxBuildDistribution
+        & $wslCommand.Source -d $distribution --exec /bin/true *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -443,17 +466,40 @@ function Ensure-AndroidWorkload {
     if ($script:Headless) {
         Fail 'The .NET Android workload is missing. Install it explicitly before running a headless Android build.'
     }
-    # The .NET 11 PREVIEW SDK defaults to workload-SET mode, pinned to a set that can reference an android
-    # pack build never published to nuget.org; manifest update-mode resolves the latest android manifest.
-    try { & $dotnet workload config --update-mode manifests 2>&1 | Out-Null } catch {}
-    $rc = Invoke-Stage $dotnet @('workload','install','android') 8 12 "Installing .NET Android workload (~1 GB)..." (Join-Path $env:TEMP 'rm_wlinstall.log') 2400
+    $rc = Invoke-Stage $dotnet @('workload','install','android') 8 12 "Installing .NET Android workload (~1 GB)..." (Join-Path $logDir 'rm_wlinstall.log') 2400
     $tools['Android workload'] = 'FAILED - run as admin: dotnet workload install android'
     if ($rc -eq 0 -and (HasAndroidWorkload)) {
         $tools['Android workload'] = 'installed'
     }
 }
 function OutName([string]$suffix) { Join-Path $outDir ("RatioMaster.NET_{0}_v{1}" -f $suffix,$ver) }
-function Find-VCArm64Link { foreach ($b in @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")) { if ([IO.Directory]::Exists($b)) { $l = Get-ChildItem (Join-Path $b '*\*\VC\Tools\MSVC\*\bin\Hostx64\arm64\link.exe') -ErrorAction SilentlyContinue | Select-Object -First 1; if ($l) { return $l.FullName } } }; return $null }
+function Find-VCLink([string]$architecture) {
+    $installations = @()
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if ([IO.File]::Exists($vswhere)) {
+        $instances = (& $vswhere -products '*' -format json 2>$null | Out-String) | ConvertFrom-Json
+        $installations = @($instances | Sort-Object { [version]$_.installationVersion } -Descending | ForEach-Object { $_.installationPath })
+    }
+    foreach ($base in @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")) {
+        if ([IO.Directory]::Exists($base)) {
+            $installations += @(Get-ChildItem -Path (Join-Path $base '*\*') -Directory -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName })
+        }
+    }
+    foreach ($installation in ($installations | Select-Object -Unique)) {
+        $toolsets = @(Get-ChildItem -Path (Join-Path $installation 'VC\Tools\MSVC\*') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending)
+        foreach ($toolset in $toolsets) {
+            $linker = Join-Path $toolset.FullName ('bin\Hostx64\' + $architecture + '\link.exe')
+            if ([IO.File]::Exists($linker)) {
+                return $linker
+            }
+        }
+    }
+    return $null
+}
+function Find-VCArm64Link {
+    return Find-VCLink 'arm64'
+}
 function Ensure-VCArm64 {
     if (Find-VCArm64Link) { return $true }
     if ($script:Headless) {
@@ -461,15 +507,15 @@ function Ensure-VCArm64 {
     }
     $base  = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'; $vsw = Join-Path $base 'vswhere.exe'; $setup = Join-Path $base 'setup.exe'
     if (-not [IO.File]::Exists($vsw) -or -not [IO.File]::Exists($setup)) { return $false }
-    $inst = (& $vsw -all -prerelease -products * -property installationPath | Select-Object -First 1); if (-not $inst) { return $false }
-    Invoke-Stage $setup @('modify','--installPath',$inst,'--add','Microsoft.VisualStudio.Component.VC.Tools.ARM64','--quiet','--norestart','--force','--wait') 63 66 "Installing MSVC ARM64 build tools (~2 GB)..." (Join-Path $env:TEMP 'rm_vcarm64.log') | Out-Null
+    $inst = & $vsw -latest -products '*' -property installationPath | Select-Object -First 1
+    if (-not $inst) {
+        return $false
+    }
+    Invoke-Stage $setup @('modify','--installPath',$inst,'--add','Microsoft.VisualStudio.Component.VC.Tools.ARM64','--quiet','--norestart','--force','--wait') 63 66 "Installing MSVC ARM64 build tools (~2 GB)..." (Join-Path $logDir 'rm_vcarm64.log') | Out-Null
     return [bool](Find-VCArm64Link)
 }
 function Find-VCx64Link {
-    $vsw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if ([IO.File]::Exists($vsw)) { $inst = & $vsw -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1; if ($inst) { $l = Get-ChildItem (Join-Path $inst 'VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe') -ErrorAction SilentlyContinue | Select-Object -First 1; if ($l) { return $l.FullName } } }
-    foreach ($b in @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")) { if ([IO.Directory]::Exists($b)) { $l = Get-ChildItem (Join-Path $b '*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe') -ErrorAction SilentlyContinue | Select-Object -First 1; if ($l) { return $l.FullName } } }
-    return $null
+    return Find-VCLink 'x64'
 }
 function Find-WinSdk { foreach ($r in @("${env:ProgramFiles(x86)}\Windows Kits\10\Lib", "$env:ProgramFiles\Windows Kits\10\Lib")) { if ([IO.Directory]::Exists($r)) { $k = Get-ChildItem (Join-Path $r '*\um\x64\kernel32.lib') -ErrorAction SilentlyContinue | Select-Object -First 1; if ($k) { return $k.FullName } } }; return $null }
 function Ensure-VSCppX64 {
@@ -480,11 +526,13 @@ function Ensure-VSCppX64 {
     Update-LoadingPopup 8 "Installing C++ build tools + Windows SDK (Native-AOT)..."
     $base = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'; $vsw = Join-Path $base 'vswhere.exe'; $vsSetup = Join-Path $base 'setup.exe'
     if ([IO.File]::Exists($vsw) -and [IO.File]::Exists($vsSetup)) {
-        $inst = & $vsw -all -prerelease -products * -property installationPath 2>$null | Select-Object -First 1
-        if ($inst) { Invoke-Stage $vsSetup @('modify','--installPath',$inst,'--add','Microsoft.VisualStudio.Workload.VCTools','--includeRecommended','--quiet','--norestart','--force','--wait') 8 12 "Adding C++ build tools + Windows SDK to VS (~4 GB)..." (Join-Path $env:TEMP 'rm_vcx64.log') 3600 | Out-Null }
+        $inst = & $vsw -latest -products '*' -property installationPath 2>$null | Select-Object -First 1
+        if ($inst) {
+            Invoke-Stage $vsSetup @('modify','--installPath',$inst,'--add','Microsoft.VisualStudio.Workload.VCTools','--includeRecommended','--quiet','--norestart','--force','--wait') 8 12 "Adding C++ build tools + Windows SDK to VS (~4 GB)..." (Join-Path $logDir 'rm_vcx64.log') 3600 | Out-Null
+        }
     }
     if (((-not (Find-VCx64Link)) -or (-not (Find-WinSdk))) -and (Have-Cmd 'winget')) {
-        Invoke-Stage 'winget' @('install','--id','Microsoft.VisualStudio.2022.BuildTools','-e','--silent','--accept-package-agreements','--accept-source-agreements','--override','--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended') 8 12 "Installing VS Build Tools (C++ + Windows SDK, ~4 GB)..." (Join-Path $env:TEMP 'rm_bt_install.log') 3600 | Out-Null
+        Invoke-Stage 'winget' @('install','--id','Microsoft.VisualStudio.2022.BuildTools','-e','--silent','--accept-package-agreements','--accept-source-agreements','--override','--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended') 8 12 "Installing VS Build Tools (C++ + Windows SDK, ~4 GB)..." (Join-Path $logDir 'rm_bt_install.log') 3600 | Out-Null
         Refresh-Path
     }
     if ((-not (Find-VCx64Link)) -or (-not (Find-WinSdk))) {
@@ -493,7 +541,11 @@ function Ensure-VSCppX64 {
         Update-LoadingPopup 8 "Downloading VS Build Tools bootstrapper..."
         $got = $false
         try { (New-Object System.Net.WebClient).DownloadFile('https://aka.ms/vs/17/release/vs_BuildTools.exe', $bs); $got = [IO.File]::Exists($bs) -and ((Get-Item $bs).Length -gt 100000) } catch { Log "[toolchain] VS Build Tools bootstrapper download failed: $($_.Exception.Message)" }
-        if ($got) { Invoke-Stage $bs @('--quiet','--wait','--norestart','--nocache','--add','Microsoft.VisualStudio.Workload.VCTools','--includeRecommended') 9 12 "Installing VS Build Tools (C++ + Windows SDK, ~4 GB)..." (Join-Path $env:TEMP 'rm_bt_install.log') 3600 | Out-Null; Refresh-Path; try { Remove-Item $bs -Force -ErrorAction SilentlyContinue } catch {} }
+        if ($got) {
+            Invoke-Stage $bs @('--quiet','--wait','--norestart','--nocache','--add','Microsoft.VisualStudio.Workload.VCTools','--includeRecommended') 9 12 "Installing VS Build Tools (C++ + Windows SDK, ~4 GB)..." (Join-Path $logDir 'rm_bt_install.log') 3600 | Out-Null
+            Refresh-Path
+            try { Remove-Item $bs -Force -ErrorAction SilentlyContinue } catch {}
+        }
     }
     $ok = [bool]((Find-VCx64Link) -and (Find-WinSdk))
     $tools['MSVC x64 + Windows SDK'] = 'MISSING - install VS Build Tools "Desktop development with C++"'
@@ -512,7 +564,7 @@ function Ensure-AppNotRunning {
             $exe = $null; try { $exe = $_.Path } catch {}
             # No readable path -> can't rule it out, so treat it as ours (a locked file is the failure we're
             # preventing). A copy installed elsewhere can't lock OUR publish dir, so it is ignored.
-            (-not $exe) -or $exe.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase)
+            (-not $exe) -or $exe.StartsWith($appDir + '\', [StringComparison]::OrdinalIgnoreCase) -or $exe.StartsWith($publishRoot + '\', [StringComparison]::OrdinalIgnoreCase)
         })
     } catch { return }
     if (-not $live) { return }
@@ -579,7 +631,7 @@ function Test-WindowsStaticArtifact([string]$directory, [string]$rid) {
 }
 
 function Publish-WinAot([string]$rid,[string]$out,[int]$from,[int]$to) {
-    $log = Join-Path $env:TEMP "ratiomaster_publish_$rid.log"
+    $log = Join-Path $logDir "ratiomaster_publish_$rid.log"
     $rc = Invoke-Stage $dotnet @('publish', $proj, '-c','Release',"-p:DesktopRid=$rid",'-p:PublishAot=true','-o',$out) $from $to "Building Windows app ($rid, Native-AOT)..." $log
     if ($rc -ne 0) {
         return $false
@@ -597,56 +649,24 @@ function Package-WindowsExecutable([string]$rid, [string]$directory) {
         $built["Windows ($rid)"] = 'copy failed: ' + $_.Exception.Message
     }
 }
-function Zip-Dir([string]$dir,[string]$zip) {
-    $archive = $null
+function Package-Linux([string]$dir,[string]$rid) {
+    $pkg = (OutName $rid) + '.tar.gz'
+    $candidate = $pkg + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     try {
-        $basePath = [IO.Path]::GetFullPath($dir).TrimEnd('\') + '\'
-        $candidate = $zip + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-        $archive = [IO.Compression.ZipFile]::Open($candidate, [IO.Compression.ZipArchiveMode]::Create)
-        foreach ($file in (Get-ChildItem -LiteralPath $dir -File -Recurse)) {
-            $entryName = $file.FullName.Substring($basePath.Length).Replace('\', '/')
-            if ($file.Extension -eq '.session' -or $file.Name -eq 'sessions.json' -or $entryName -match '^AppDir(?:-|/)') {
-                continue
-            }
-            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entryName, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        Update-LoadingPopup 98 ("Packaging $rid (.tar.gz)...")
+        & (Join-Path $scriptDir 'New_LinuxArchive.ps1') -PublishDirectory $dir -ArchivePath $candidate
+        if (-not [IO.File]::Exists($candidate)) {
+            throw ('Linux archive creation failed for ' + $rid + '.')
         }
-        $archive.Dispose()
-        $archive = $null
-        Move-Item -LiteralPath $candidate -Destination $zip -Force
-        return [IO.File]::Exists($zip)
-    } catch {
-        Log ("[zip] " + $_.Exception.Message)
-        return $false
-    } finally {
-        if ($null -ne $archive) {
-            $archive.Dispose()
-        }
-        if ($candidate -and [IO.File]::Exists($candidate)) {
+        Move-Item -LiteralPath $candidate -Destination $pkg -Force
+        $built["Linux ($rid, self-contained JIT .tar.gz)"] = $pkg
+        Update-LoadingPopup 99 ("Packaged $rid (.tar.gz).")
+    }
+    finally {
+        if ([IO.File]::Exists($candidate)) {
             Remove-Item -LiteralPath $candidate -Force
         }
     }
-}
-function Package-Linux([string]$dir,[string]$rid) {   # .tar.gz fallback when AppImage can't be built
-    $pkg = (OutName $rid) + '.tar.gz'
-    try {
-        Remove-Item -LiteralPath $pkg -Force -ErrorAction SilentlyContinue
-        $tarExe = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source
-        if ($tarExe) {
-            $rc = Invoke-Stage $tarExe @('--exclude=*.session', '--exclude=sessions.json', '--exclude=AppDir*', '-czf', $pkg, '-C', $dir, '.') 98 99 "Packaging $rid (.tar.gz)..." (Join-Path $env:TEMP "rm_tar_$rid.log")
-            if ($rc -eq 0 -and [IO.File]::Exists($pkg)) {
-                $built["Linux ($rid, .tar.gz)"] = $pkg
-            } else {
-                $built["Linux ($rid)"] = "tar failed - raw build at $dir"
-            }
-        } else {
-            $zip = (OutName $rid) + '.zip'
-            if (Zip-Dir $dir $zip) {
-                $built["Linux ($rid, .zip)"] = $zip
-            } else {
-                $built["Linux ($rid)"] = "zip failed - raw build at $dir"
-            }
-        }
-    } catch { $built["Linux ($rid)"] = "packaging failed - raw build at $dir" }
 }
 
 # ── validate ──
@@ -666,10 +686,11 @@ if ($doApk -or $doAab) { Ensure-AndroidWorkload }
 if ($script:Headless -and $doWinArm64) {
     Ensure-VCArm64 | Out-Null
 }
-if ($daily) {
+if ($daily -and $doLinux) {
     if (Wsl-Ready) { $tools['WSL'] = 'ready' }
-    elseif (Is-Admin) { Invoke-Stage 'wsl' @('--install','--no-launch') 19 21 "Installing WSL..." (Join-Path $env:TEMP 'rm_wsl_install.log') 1800 | Out-Null; Refresh-Path; $tools['WSL'] = 'install attempted - REBOOT then re-run for Linux AppImage'; $RebootNeeded = $true }
-    else { $tools['WSL'] = 'NOT installed - run as Administrator once + reboot for the Linux AppImage' }
+    else {
+        $tools['WSL'] = 'Ubuntu 22.04 build distribution unavailable; Linux uses self-contained archives. See Installer/Scripts/package_linux.sh prerequisites.'
+    }
     try { [IO.File]::WriteAllText($stamp, (Get-Date).ToString('o')) } catch {}
 } else { $tools['Daily tool check'] = 'skipped (< 24h ago)' }
 Update-LoadingPopup 22 "Building..."
@@ -679,9 +700,8 @@ if ($argStr -match '(?i)--check-tools\b') {
     exit 0
 }
 
-# Only the desktop publishes write into publish\ (and thus collide with a running instance); an
-# apk/aab-only run leaves it alone, so don't disturb the user's session for those.
-if ($doWinX64Aot -or $doWinArm64 -or $doLinux) { Ensure-AppNotRunning }
+# Windows publishing writes into the portable executable directory and requires that application to be closed.
+if ($doWinX64Aot -or $doWinArm64) { Ensure-AppNotRunning }
 
 # ── 1) Windows app : Native-AOT (MSVC's own link.exe first on PATH so a rogue GnuWin32 `link` loses) ──
 $vcBin = $null; $vcl = Find-VCx64Link; if ($vcl) { $vcBin = Split-Path $vcl -Parent }
@@ -692,7 +712,7 @@ if ($vcBin) {
 $env:PATH = "$($script:PathPrefix);$env:PATH"
 if ($doWinX64Aot) {
     if (-not (Publish-WinAot 'win-x64' $pub 22 40)) {
-        $wl=Join-Path $env:TEMP 'ratiomaster_publish_win-x64.log'
+        $wl = Join-Path $logDir 'ratiomaster_publish_win-x64.log'
         $hint = ''
         if (-not ((Find-VCx64Link) -and (Find-WinSdk))) {
             $hint = "`r`n`r`nMSVC x64 C++ build tools or Windows SDK missing. Install Visual Studio Build Tools with Desktop development with C++."
@@ -724,7 +744,7 @@ if ($doWinArm64) {
             Package-WindowsExecutable 'win-arm64' $pubArm
         }
         else {
-            $built['Windows (win-arm64)'] = "FAILED - AOT publish or static artifact validation failed (see $env:TEMP\ratiomaster_publish_win-arm64.log)"
+            $built['Windows (win-arm64)'] = "FAILED - AOT publish or static artifact validation failed (see $logDir\ratiomaster_publish_win-arm64.log)"
         }
     }
     else {
@@ -739,9 +759,9 @@ if ($doWinArm64) {
 if ($doApk -or $doAab) {
     Update-LoadingPopup 70 "Checking Android toolchain..."
     if (HasAndroidWorkload) {
-        $logDeps = Join-Path $env:TEMP 'ratiomaster_android_deps.log'
-        $logApk  = Join-Path $env:TEMP 'ratiomaster_apk.log'
-        $logAab  = Join-Path $env:TEMP 'ratiomaster_aab.log'
+        $logDeps = Join-Path $logDir 'ratiomaster_android_deps.log'
+        $logApk  = Join-Path $logDir 'ratiomaster_apk.log'
+        $logAab  = Join-Path $logDir 'ratiomaster_aab.log'
         $androidSdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
         $androidJdk = Join-Path $env:LOCALAPPDATA 'Android\jdk'
         if ($script:Headless) {
@@ -765,8 +785,9 @@ if ($doApk -or $doAab) {
         # Java resolves short paths to their long form. An ASCII temporary directory avoids spaces and accents.
         $asciiTmp = Join-Path $env:SystemDrive 'rm-tmp'
         try { New-Item -ItemType Directory -Force -Path $asciiTmp | Out-Null; $env:TEMP = $asciiTmp; $env:TMP = $asciiTmp } catch {}
-        $manPath = Join-Path $appDir 'Properties\AndroidManifest.xml'
-        $manOrig = $null; $rc = $null; $rcAab = $null
+        $savedJavaHome = $env:JAVA_HOME
+        $rc = $null
+        $rcAab = $null
         try {
             # Acquire/refresh the Android SDK + the JDK .NET needs (user paths, no admin).
             if ((-not [IO.Directory]::Exists((Join-Path $androidSdk 'platform-tools'))) -or (-not [IO.File]::Exists((Join-Path $androidJdk 'bin\keytool.exe'))) -or $daily) {
@@ -775,36 +796,6 @@ if ($doApk -or $doAab) {
                 }
                 Invoke-Stage $dotnet (@('build', $apkProj, '-c','Release','-f','net11.0-android','-t:InstallAndroidDependencies') + $androidArgs) 70 72 "Installing Android SDK + JDK..." $logDeps | Out-Null
             }
-            # targetSdk = the highest STABLE installed platform (auto-detected: source.properties
-            # PreviewSdkInt = 0 ⇒ released). Fall back to highest installed, then to 35 (Play floor).
-            # Rewritten into the manifest for THIS build only; restored in the finally.
-            $tgtApi = 0; $tgtKind = 'highest stable installed'
-            try {
-                $platDir = Join-Path $androidSdk 'platforms'; $bestStable = 0; $bestAny = 0
-                if ([IO.Directory]::Exists($platDir)) {
-                    foreach ($pd in (Get-ChildItem $platDir -Directory -EA SilentlyContinue)) {
-                        $sp = Join-Path $pd.FullName 'source.properties'; if (-not [IO.File]::Exists($sp)) { continue }
-                        $txt = [IO.File]::ReadAllText($sp)
-                        if ($txt -notmatch '(?im)^[ \t]*AndroidVersion\.ApiLevel[ \t]*=[ \t]*(\d+)') { continue }
-                        $api = [int]$Matches[1]
-                        $preview = 0
-                        if ($txt -match '(?im)^[ \t]*AndroidVersion\.PreviewSdkInt[ \t]*=[ \t]*(\d+)') {
-                            $preview = [int]$Matches[1]
-                        }
-                        if ($api -gt $bestAny) { $bestAny = $api }
-                        if ($preview -eq 0 -and $api -gt $bestStable) { $bestStable = $api }
-                    }
-                }
-                if ($bestStable -gt 0) { $tgtApi = $bestStable }
-                elseif ($bestAny -gt 0) { $tgtApi = $bestAny; $tgtKind = 'highest installed (no stable platform)' }
-            } catch {}
-            if ($tgtApi -lt 1) { $tgtApi = 35; $tgtKind = 'Play floor (no platform detected)' }
-            try {
-                $o = [IO.File]::ReadAllText($manPath)
-                $n = [regex]::Replace($o, 'android:targetSdkVersion="\d+"', "android:targetSdkVersion=`"$tgtApi`"")
-                if ($n -ne $o) { try { [IO.File]::WriteAllText(($manPath + '.rmbak'), $o) } catch {}; $manOrig = $o; [IO.File]::WriteAllText($manPath, $n) }
-                $built['Android targetSdk'] = "$tgtApi ($tgtKind)"
-            } catch {}
             $env:JAVA_HOME = $androidJdk
             # SIGNING: a RELEASE keystore from env when all four vars are set AND the file exists; otherwise a
             # debug keystore (sideload only). For a Play release, set RM_ANDROID_KEYSTORE / _PASS / _ALIAS / _KEY_PASS.
@@ -828,7 +819,7 @@ if ($doApk -or $doAab) {
             if ($doAab) { $rcAab = Invoke-Stage $dotnet (@('build', $apkProj, '-c','Release','-f','net11.0-android','-p:AndroidPackageFormat=aab') + $androidArgs + $sign) 82 84 "Building Android App Bundle (.aab)..." $logAab }
         }
         finally {
-            if ($manOrig) { try { [IO.File]::WriteAllText($manPath, $manOrig) } catch {}; try { [IO.File]::Delete($manPath + '.rmbak') } catch {} }
+            $env:JAVA_HOME = $savedJavaHome
             $env:TEMP = $savedTemp; $env:TMP = $savedTmp
             if ($junction) {
                 $junctionInfo = Get-Item -LiteralPath $junction -Force
@@ -840,7 +831,15 @@ if ($doApk -or $doAab) {
                 [IO.Directory]::Delete($actualJunction)
             }
         }
-        $abin = Join-Path $appDir 'bin\Release\net11.0-android'
+        $logOutput = Join-Path $logDir 'ratiomaster_android_output-path.log'
+        $outputResult = Invoke-Stage $dotnet @('msbuild', $proj, '-nologo', '-getProperty:OutputPath', '-p:Configuration=Release', '-p:IncludeAndroid=true', '-p:TargetFramework=net11.0-android') 84 84 'Locating Android build output...' $logOutput
+        if ($outputResult -ne 0) {
+            Fail ('Unable to locate the Android build output. See ' + $logOutput)
+        }
+        $abin = (Read-TextRobust $logOutput).Trim()
+        if (-not [IO.Path]::IsPathRooted($abin)) {
+            $abin = [IO.Path]::GetFullPath((Join-Path $appDir $abin))
+        }
         if ($doApk) {
             if ($rc -eq 0) {
                 $apk = Get-ChildItem $abin -Recurse -Filter '*-Signed.apk' -EA SilentlyContinue | Select-Object -First 1
@@ -865,7 +864,7 @@ if ($doApk -or $doAab) {
 
 # Linux native and portable fallback stages share the build runner and canonical outputs.
 if ($doLinux) {
-    . (Join-Path $batDir 'Build_LinuxArtifacts.ps1')
+    . (Join-Path $scriptDir 'Build_LinuxArtifacts.ps1')
 }
 
 # ── summary ──
@@ -889,8 +888,4 @@ if ($failedArtifacts.Count -gt 0) {
     Fail ('One or more selected artifacts failed or could not be built. ' + ($failedArtifacts -join '; '))
 }
 
-if ($RebootNeeded -and -not $script:Headless) {
-    $r = [System.Windows.Forms.MessageBox]::Show("WSL was just installed and needs a REBOOT before it works (no Linux AppImage this run). Reboot now?", 'RatioMaster.NET Packing - reboot needed', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { try { $sd = Start-Process 'shutdown.exe' -ArgumentList '/r /t 5 /c "RatioMaster: finishing WSL setup"' -PassThru -Wait -WindowStyle Hidden; if ($sd -and $sd.ExitCode -ne 0) { Restart-Computer -Force } } catch { try { Restart-Computer -Force } catch {} } }
-}
 exit 0

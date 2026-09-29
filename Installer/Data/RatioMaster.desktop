@@ -4,5 +4,5 @@ Name=RatioMaster.NET
 Comment=BitTorrent ratio emulator
 Exec=RatioMaster.NET
 Icon=ratiomaster
-Categories=Network;Utility;
+Categories=Network;P2P;
 Terminal=false

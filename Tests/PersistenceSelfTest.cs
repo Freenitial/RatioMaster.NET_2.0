@@ -3,11 +3,14 @@ namespace RatioMaster;
 
 using System;
 using System.IO;
+using System.IO.Pipes;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Threading;
 using RatioMaster.Services;
+using RatioMaster.ViewModels;
 
 internal static class PersistenceSelfTest
 {
@@ -23,6 +26,55 @@ internal static class PersistenceSelfTest
         }
         try
         {
+            using MemoryStream activation = new(new byte[] { 1 });
+            using MemoryStream invalidActivation = new(new byte[] { 0 });
+            using MemoryStream emptyActivation = new();
+            Check(await SingleInstance.ReadActivationAsync(activation, CancellationToken.None)
+                && !await SingleInstance.ReadActivationAsync(invalidActivation, CancellationToken.None)
+                && !await SingleInstance.ReadActivationAsync(emptyActivation, CancellationToken.None),
+                "instance activation accepts its signal byte and rejects empty or invalid payloads");
+            string pipeName = "ratiomaster-activation-test-" + Guid.NewGuid().ToString("N");
+            using NamedPipeServerStream activationServer = new(pipeName, PipeDirection.In, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using NamedPipeClientStream activationClient = new(".", pipeName, PipeDirection.Out,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using CancellationTokenSource connectionDeadline = new(TimeSpan.FromSeconds(5));
+            Task connection = activationServer.WaitForConnectionAsync(connectionDeadline.Token);
+            await activationClient.ConnectAsync(connectionDeadline.Token);
+            await connection;
+            using CancellationTokenSource cancelledRead = new();
+            Task<bool> idleRead = SingleInstance.ReadActivationAsync(activationServer, cancelledRead.Token);
+            Check(!idleRead.IsCompleted, "an idle activation client waits asynchronously for its signal");
+            cancelledRead.Cancel();
+            bool cancelled = false;
+            try { await idleRead.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (OperationCanceledException) { cancelled = true; }
+            Check(cancelled, "instance activation reads honor their deadline cancellation");
+            await CheckActivationRecoveryAsync(Check);
+            string imagePath = Path.Combine(directory, "RatioMaster.AppImage");
+            File.WriteAllText(imagePath, "AppImage location fixture");
+            string firstRoot = Directory.CreateDirectory(Path.Combine(directory, ".mount_first")).FullName;
+            string secondRoot = Directory.CreateDirectory(Path.Combine(directory, ".mount_second")).FullName;
+            string firstMount = Path.Combine(firstRoot, "usr", "bin");
+            string secondMount = Path.Combine(secondRoot, "usr", "bin");
+            Check(SessionStore.DesktopLocation(firstMount, imagePath, firstRoot) == directory
+                && SessionStore.DesktopLocation(secondMount, imagePath, secondRoot) == directory,
+                "AppImage storage follows the executable location across temporary mount changes");
+            Check(SessionStore.DesktopLocation(firstMount, null, firstRoot) == firstMount
+                && SessionStore.DesktopLocation(firstMount, Path.Combine(directory, "missing.AppImage"), firstRoot) == firstMount,
+                "ordinary desktop storage ignores absent AppImage paths");
+            Check(SessionStore.DesktopLocation(firstMount, imagePath, secondRoot) == firstMount
+                && SessionStore.DesktopLocation(firstMount, imagePath, null) == firstMount
+                && SessionStore.DesktopLocation(firstRoot + "_other", imagePath, firstRoot) == firstRoot + "_other",
+                "a standalone executable ignores AppImage variables inherited from another application");
+            byte[] torrentBytes = TorrentFormatSelfTest.V2FixtureBytes();
+            string cacheDirectory = Path.Combine(directory, "torrent-cache");
+            string cached = RatioTabViewModel.TryCacheTorrent(torrentBytes, cacheDirectory)!;
+            File.WriteAllBytes(cached, [1, 2, 3]);
+            Check(RatioTabViewModel.TryCacheTorrent(torrentBytes, cacheDirectory) == cached
+                && File.ReadAllBytes(cached).SequenceEqual(torrentBytes)
+                && !Directory.EnumerateFiles(cacheDirectory, "*.tmp").Any(),
+                "reselecting torrent content atomically repairs a truncated private cache copy");
             string path = Path.Combine(directory, "session.json");
             SessionRepository repository = new(path);
             SessionData Snapshot(long uploaded) => new()
@@ -96,6 +148,52 @@ internal static class PersistenceSelfTest
         catch (Exception ex) { Check(false, ex.ToString()); }
         finally { Directory.Delete(directory, recursive: true); }
         return ok;
+    }
+
+    private static async Task CheckActivationRecoveryAsync(Action<bool, string> check)
+    {
+        string name = "ratiomaster-listener-test-" + Guid.NewGuid().ToString("N");
+        using CancellationTokenSource stop = new();
+        TaskCompletionSource readyAfterEmpty = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource activated = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int endpoints = 0;
+        int activations = 0;
+        void OnListening()
+        {
+            int endpoint = Interlocked.Increment(ref endpoints);
+            if (endpoint == 1)
+            {
+                using NamedPipeClientStream early = new(".", name, PipeDirection.Out);
+                early.Connect(2000);
+            }
+            if (endpoint >= 3) readyAfterEmpty.TrySetResult();
+        }
+        Task listener = SingleInstance.ListenAsync(name, () =>
+        {
+            Interlocked.Increment(ref activations);
+            activated.TrySetResult();
+        }, stop.Token, OnListening);
+        try
+        {
+            using (NamedPipeClientStream empty = new(".", name, PipeDirection.Out, PipeOptions.Asynchronous))
+                await empty.ConnectAsync(2000);
+            await readyAfterEmpty.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            using (NamedPipeClientStream valid = new(".", name, PipeDirection.Out, PipeOptions.Asynchronous))
+            {
+                await valid.ConnectAsync(2000);
+                valid.WriteByte(1);
+                await valid.FlushAsync();
+                await activated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            check(activations == 1 && !listener.IsCompleted,
+                "activation listener recovers from clients closing before acceptance and before sending a signal");
+        }
+        finally
+        {
+            stop.Cancel();
+            await listener.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        check(listener.IsCompletedSuccessfully, "activation listener cancellation releases its pipe without a retry loop");
     }
 }
 #endif

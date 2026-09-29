@@ -1,10 +1,12 @@
 #if DEBUG
 namespace RatioMaster;
 
+using System.Globalization;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using RatioMaster.BitTorrent;
 using RatioMaster.Engine;
 using RatioMaster.Models;
 
@@ -28,6 +30,7 @@ internal static class NetworkTransportSelfTest
         Console.WriteLine("--- Local HTTP and proxy transport checks ---");
         try
         {
+            CheckBencoding();
             await CheckHttp("Content-Length completes before keep-alive closure", Response(Body), r => r?.Dict != null, holdOpen: true,
                 inspect: request => request.Contains("Connection: Keep-Alive\r\n") && !request.Contains("Connection: close\r\n"));
             await CheckHttp("initial request preserves escapes, duplicate keys and fragment boundary", Response(Body), r => r?.Dict != null,
@@ -132,6 +135,41 @@ internal static class NetworkTransportSelfTest
         checks++;
         if (!condition) failures++;
         Console.WriteLine($"  [{(condition ? "PASS" : "FAIL")}] {name}");
+    }
+
+    private static void CheckBencoding()
+    {
+        foreach (string invalid in new[]
+        {
+            "d1:xi-0ee", "d1:xi01ee", "d1:xi-01ee", "d1:xiee", "d1:xi--1ee",
+            "d1:xi9223372036854775808ee", "d1:x01:ae", "d1:x00:e", "d1:xi1e1:xi2ee",
+        })
+        {
+            TrackerResponse response = new(Response(Ascii(invalid)));
+            Check(response.Dict is null && response.Error.Length > 0, "malformed tracker bencoding refused: " + invalid);
+        }
+
+        string manyNodes = "d1:xl" + string.Concat(Enumerable.Repeat("0:", BEncode.MaxNodes)) + "ee";
+        TrackerResponse excessive = new(Response(Ascii(manyNodes)));
+        Check(excessive.Dict is null && excessive.Error.Contains("node limit", StringComparison.Ordinal),
+            "tracker bencoding bounds allocation count within the receive limit");
+        Check(new TrackerResponse(Response(Body)).Dict is not null,
+            "bencoding budget resets after a rejected document");
+
+        CultureInfo saved = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo custom = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+            custom.NumberFormat.NegativeSign = "~";
+            CultureInfo.CurrentCulture = custom;
+            ValueNumber encoded = new(long.MinValue);
+            Check(Encoding.ASCII.GetString(encoded.Encode()) == "i-9223372036854775808e",
+                "bencoded integer serialization uses invariant decimal notation");
+            using MemoryStream input = new(Ascii("i-9223372036854775808e"));
+            Check(BEncode.Parse(input) is ValueNumber number && number.Integer == long.MinValue,
+                "bencoded integer decoding is independent of the process culture");
+        }
+        finally { CultureInfo.CurrentCulture = saved; }
     }
 
     private static async Task CheckHttp(string name, byte[] response, Func<TrackerResponse?, bool> check, bool holdOpen = false,

@@ -36,21 +36,19 @@
 
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <!-- `publish\` holds desktop build output (incl. Linux libSkiaSharp.so / libHarfBuzzSharp.so). Keep it
-         out of ALL default item globs so the Android build doesn't try to package those .so as native
-         libs (XA4301 "cannot determine ABI"). Harmless on desktop (nothing there is project source). -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);publish\**</DefaultItemExcludes>
+    <!-- Local build directories contain generated code and platform-specific libraries, not source items. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;publish\**</DefaultItemExcludes>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>RatioMaster</RootNamespace>
     <AssemblyName>RatioMaster.NET</AssemblyName>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <AvaloniaVersion>12.1.3</AvaloniaVersion>
     <UseWindowsForms>false</UseWindowsForms>
     <UseWPF>false</UseWPF>
-    <NoWarn>$(NoWarn);NETSDK1206</NoWarn>
     <IsAotCompatible>true</IsAotCompatible>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <Version>2.1.0</Version>
+    <Version>2.2.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -67,17 +65,11 @@
   <PropertyGroup Condition="'$(IncludeAndroid)' == 'true'">
     <Nullable>enable</Nullable>
     <ApplicationId>net.ratiomaster.app</ApplicationId>
-    <ApplicationVersion>20100</ApplicationVersion>
-    <ApplicationDisplayVersion>2.1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>20200</ApplicationVersion>
+    <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidManifest>Properties\AndroidManifest.xml</AndroidManifest>
-    <!-- IL2104 = the aggregate "assembly produced trim warnings". The only assembly that trips it is
-         Avalonia.DesignerSupport — a DESIGN-TIME-ONLY assembly (the XAML previewer, dead at runtime) that
-         Avalonia ships (BOTH stable and nightly emit this). Benign. Our OWN trim issues would surface as
-         their specific codes (IL2026/IL2091/IL2075/…), which stay visible — so this silences exactly the
-         third-party design-time noise and nothing of ours (same spirit as DiscoGOGO's IL3053/XA1006). -->
-    <NoWarn>$(NoWarn);IL2104</NoWarn>
   </PropertyGroup>
 
   <!-- Release = Native AOT on every DESKTOP platform (win/linux/osx). NOT Android (CoreCLR + r8/d8). -->
@@ -97,7 +89,6 @@
     <OptimizationPreference>Size</OptimizationPreference>
     <IlcOptimizationPreference>Size</IlcOptimizationPreference>
     <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
-    <NoWarn>$(NoWarn);IL3053</NoWarn>
   </PropertyGroup>
 
   <!-- Native AOT and static graphics produce one Windows executable without library extraction. -->
@@ -105,16 +96,6 @@
     <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
     <StaticExecutable>true</StaticExecutable>
   </PropertyGroup>
-
-  <!-- The x64 package supplies archives; its direct calls and Windows libraries are declared here. -->
-  <ItemGroup Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-x64'">
-    <DirectPInvoke Include="libHarfBuzzSharp" />
-    <DirectPInvoke Include="libSkiaSharp" />
-    <LinkerArg Include="Gdi32.lib;User32.lib" />
-    <LinkerArg Include="Ole32.lib" />
-    <LinkerArg Include="fontsub.lib;USP10.lib" />
-    <LinkerArg Include="/LTCG" />
-  </ItemGroup>
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
@@ -129,52 +110,53 @@
        usings (they collide with Avalonia.Application / Avalonia.Layout.Orientation), and exclude the
        desktop entry point (MainActivity.cs is the Android entry, gated on #if ANDROID). -->
   <ItemGroup Condition="'$(IncludeAndroid)' == 'true'">
-    <PackageReference Include="Avalonia.Android" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Android" Version="$(AvaloniaVersion)" />
     <Using Remove="Android.App" />
     <Using Remove="Android.Widget" />
     <Compile Remove="Program.cs" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(IncludeAndroid)' == 'true' AND '$(Configuration)' == 'Release'">
+    <!-- The desktop XAML previewer has no entry point in the Android application. -->
+    <TrimmableAssembly Include="Avalonia.DesignerSupport" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(Configuration)' == 'Debug' AND '$(IncludeAndroid)' != 'true'">
-    <PackageReference Include="Avalonia.Headless" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Headless" Version="$(AvaloniaVersion)" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="12.0.5" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.5" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.5" />
+    <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
   </ItemGroup>
 
   <!-- Desktop-only windowing backend (Win32/X11/macOS). Android uses Avalonia.Android instead. -->
   <ItemGroup Condition="'$(IncludeAndroid)' != 'true'">
-    <PackageReference Include="Avalonia.Desktop" Version="12.0.5" />
+    <PackageReference Include="Avalonia.Desktop" Version="$(AvaloniaVersion)" />
   </ItemGroup>
 
-  <!-- Static graphics providers are selected per Windows architecture. -->
-  <ItemGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-x64'">
-    <PackageReference Include="2ndLAB.SkiaSharp.Static" Version="3.119.0-10.0.26100.0-1.1c7d845" />
-  </ItemGroup>
-
-  <PropertyGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+  <!-- Both Windows architectures use the same Skia ABI and software-rendering provider. -->
+  <PropertyGroup Condition="'$(UseStaticSkia)' == 'true'">
     <OptrisStaticGraphicsRequiredBackends>Software</OptrisStaticGraphicsRequiredBackends>
     <OptrisStaticGraphicsAcknowledgeReducedTier>true</OptrisStaticGraphicsAcknowledgeReducedTier>
     <!-- Program configures Software explicitly; no reflection-based rendering guard is compiled. -->
     <OptrisStaticGraphicsInjectRuntimeGuard>false</OptrisStaticGraphicsInjectRuntimeGuard>
   </PropertyGroup>
-  <ItemGroup Condition="'$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+  <ItemGroup Condition="'$(UseStaticSkia)' == 'true'">
     <PackageReference Include="Optris.StaticGraphics.Avalonia.Software" Version="3.119.4.1" GeneratePathProperty="true" />
   </ItemGroup>
 
-  <Target Name="ValidateWindowsArm64StaticGraphics" BeforeTargets="LinkNative"
-          Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true' AND '$(DesktopRid)' == 'win-arm64'">
+  <Target Name="ValidateWindowsStaticGraphics" BeforeTargets="LinkNative"
+          Condition="'$(PublishAot)' == 'true' AND '$(UseStaticSkia)' == 'true'">
     <PropertyGroup>
-      <_Arm64StaticGraphicsRoot>$(PkgOptris_StaticGraphics_Avalonia_Software)/static/win-arm64/native</_Arm64StaticGraphicsRoot>
+      <_WindowsStaticGraphicsRoot>$(PkgOptris_StaticGraphics_Avalonia_Software)/static/$(DesktopRid)/native</_WindowsStaticGraphicsRoot>
     </PropertyGroup>
-    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/skia.lib')" Text="Windows ARM64 static graphics archive is missing: skia.lib. Restore the configured graphics package." />
-    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/SkiaSharp.lib')" Text="Windows ARM64 static graphics archive is missing: SkiaSharp.lib. Restore the configured graphics package." />
-    <Error Condition="!Exists('$(_Arm64StaticGraphicsRoot)/libHarfBuzzSharp.lib')" Text="Windows ARM64 static graphics archive is missing: libHarfBuzzSharp.lib. Restore the configured graphics package." />
-    <Error Condition="'$(OptrisStaticGraphicsTier)' != 'Software'" Text="Windows ARM64 requires the Software static graphics tier configured by Program." />
+    <Error Condition="!Exists('$(_WindowsStaticGraphicsRoot)/skia.lib')" Text="$(DesktopRid) static graphics archive is missing: skia.lib. Restore the configured graphics package." />
+    <Error Condition="!Exists('$(_WindowsStaticGraphicsRoot)/SkiaSharp.lib')" Text="$(DesktopRid) static graphics archive is missing: SkiaSharp.lib. Restore the configured graphics package." />
+    <Error Condition="!Exists('$(_WindowsStaticGraphicsRoot)/libHarfBuzzSharp.lib')" Text="$(DesktopRid) static graphics archive is missing: libHarfBuzzSharp.lib. Restore the configured graphics package." />
+    <Error Condition="'$(OptrisStaticGraphicsTier)' != 'Software'" Text="Windows requires the Software static graphics tier configured by Program." />
   </Target>
 
   <!-- Link-time artifacts are excluded from desktop distributions. Windows uses static graphics

@@ -85,6 +85,7 @@ internal sealed class RatioEngine(
             if (!ushort.TryParse(config.Port, out ushort port) || port == 0)
                 throw new ArgumentException("Listening port must be between 1 and 65535.");
             if (config.TotalLength < 0) throw new ArgumentException("Invalid torrent size.");
+            if (!double.IsFinite(config.FinishedPercent)) throw new ArgumentException("Finished percentage must be finite.");
             cfg = config;
             profile = config.Client.Snapshot();
             sessionProxy = new ProxyConfig
@@ -98,7 +99,7 @@ internal sealed class RatioEngine(
             http = new TrackerClient(sessionProxy, message => Log?.Invoke(message));
             uploaded = Math.Max(0, config.ResumeUploaded);
             downloaded = Math.Clamp(config.ResumeDownloaded > 0 ? config.ResumeDownloaded
-                : (long)(config.TotalLength * Math.Clamp(config.FinishedPercent, 0, 100) / 100), 0, config.TotalLength);
+                : (long)(config.TotalLength * (decimal)Math.Clamp(config.FinishedPercent, 0, 100) / 100m), 0, config.TotalLength);
             completedSent = downloaded == config.TotalLength;
             interval = Math.Clamp(config.Interval, MinimumIntervalSeconds, MaximumIntervalSeconds);
             lastTick = startedAt = keyCreatedAt = clock.GetTimestamp();
@@ -803,31 +804,11 @@ internal sealed class RatioEngine(
         {
             if (peers is ValueString ps)
             {
-                byte[] bytes = Latin1.GetBytes(ps.String);
-                using BinaryReader reader = new(new MemoryStream(bytes));
-                PeerList list = [];
-                for (int i = 0; i + 6 <= bytes.Length; i += 6)
-                {
-                    list.Add(new Peer(reader.ReadBytes(4), reader.ReadInt16()));
-                }
-
-                Log?.Invoke("peers: " + list);
+                Log?.Invoke("peers: " + PeerList.FormatCompact(ps.Bytes, 4));
             }
             else if (peers is ValueList pl)
             {
-                PeerList list = [];
-                foreach (object entry in pl)
-                {
-                    if (entry is ValueDictionary d)
-                    {
-                        list.Add(new Peer(
-                            BEncode.String(d["ip"]) ?? string.Empty,
-                            BEncode.String(d["port"]) ?? "0",
-                            BEncode.String(d["peer id"]) ?? string.Empty));
-                    }
-                }
-
-                Log?.Invoke("peers: " + list);
+                Log?.Invoke("peers: " + PeerList.FormatDictionary(pl));
             }
         }
         catch (Exception ex)
@@ -837,9 +818,7 @@ internal sealed class RatioEngine(
     }
 
     /// <summary>
-    /// BEP 7 compact IPv6 peer list: a flat byte string of 18-byte records (16-byte address followed by a
-    /// 2-byte BIG-ENDIAN port). Read straight from the raw bytes — decoding the port here means the Peer
-    /// ctor must NOT byte-swap again (that's the ushort overload).
+    /// BEP 7 compact IPv6 peers use 18-byte records: a 16-byte address and a big-endian port.
     /// </summary>
     private void LogPeers6(IBEncodeValue peers)
     {
@@ -847,17 +826,7 @@ internal sealed class RatioEngine(
         {
             if (peers is ValueString ps)
             {
-                byte[] bytes = ps.Bytes;
-                PeerList list = [];
-                for (int i = 0; i + 18 <= bytes.Length; i += 18)
-                {
-                    byte[] ip = new byte[16];
-                    Array.Copy(bytes, i, ip, 0, 16);
-                    ushort port = (ushort)((bytes[i + 16] << 8) | bytes[i + 17]);
-                    list.Add(new Peer(ip, port));
-                }
-
-                Log?.Invoke("peers6: " + list);
+                Log?.Invoke("peers6: " + PeerList.FormatCompact(ps.Bytes, 16));
             }
         }
         catch (Exception ex)

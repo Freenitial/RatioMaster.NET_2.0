@@ -8,9 +8,11 @@ fail() {
 
 [ "$(uname -s)" = "Darwin" ] || fail "macOS packaging requires a Mac with Xcode command-line tools."
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
-repository_root="$(cd "$script_dir/.." && pwd -P)"
+installer_root="$(cd "$script_dir/.." && pwd -P)"
+repository_root="$(cd "$installer_root/.." && pwd -P)"
 project="$repository_root/RatioMaster.App/RatioMaster.App.csproj"
-output_root="$script_dir/Output"
+output_root="$installer_root/Output"
+log_root="$repository_root/artifacts/logs/build"
 icon_source="$repository_root/RatioMaster.App/Resources/mipmap-xxxhdpi/icon.png"
 if [ ! -f "$icon_source" ]; then
     icon_source="$repository_root/RatioMaster.App/Assets/icon.ico"
@@ -21,7 +23,7 @@ for tool in dotnet xcrun sips iconutil plutil codesign ditto xmllint; do
 done
 xcrun --find clang >/dev/null
 
-[ "$#" -le 1 ] || fail "Usage: bash Installer/package_macos.sh [osx-arm64|osx-x64]"
+[ "$#" -le 1 ] || fail "Usage: bash Installer/Scripts/package_macos.sh [osx-arm64|osx-x64]"
 rid=""
 if [ "$#" -eq 1 ]; then
     rid="$1"
@@ -46,7 +48,7 @@ assembly="$(xmllint --xpath 'string(/Project/PropertyGroup/AssemblyName)' "$proj
 [[ "$assembly" =~ ^[A-Za-z0-9._-]+$ ]] || fail "The project AssemblyName is not a supported bundle executable name."
 [ -f "$icon_source" ] || fail "The project icon is missing."
 
-mkdir -p "$output_root"
+mkdir -p "$output_root" "$log_root"
 output_root="$(cd "$output_root" && pwd -P)"
 lock_path="$output_root/.validation-package.lock"
 lock_owned=0
@@ -74,11 +76,12 @@ artifact_name="$(printf '%s_%s_v%s' "$assembly" "$rid" "$version")"
 bundle_destination="$output_root/$artifact_name.app"
 archive_destination="$output_root/$artifact_name.zip"
 [ ! -e "$bundle_destination" ] || fail "The bundle already exists: $bundle_destination. Move it aside before rebuilding; its possible session data will not be deleted."
-publish_directory="$repository_root/RatioMaster.App/publish/$rid"
+stage_root="$(mktemp -d "$output_root/.macos-package.XXXXXX")"
+publish_directory="$stage_root/publish"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
 export DOTNET_NOLOGO=1
 dotnet publish "$project" -c Release "-p:DesktopRid=$rid" -p:IncludeAndroid=false \
-    -o "$publish_directory" --nologo 2>&1 | tee "$output_root/package-$rid.log"
+    -o "$publish_directory" --nologo 2>&1 | tee "$log_root/package-$rid.log"
 
 binary="$publish_directory/$assembly"
 [ -f "$binary" ] || fail "The native executable was not produced: $binary"
@@ -87,7 +90,6 @@ architecture="$(xcrun lipo -archs "$binary")"
 minimum_os="$(xcrun vtool -show-build "$binary" | awk '$1 == "minos" { print $2; exit }')"
 [[ "$minimum_os" =~ ^[0-9]+(\.[0-9]+)*$ ]] || fail "The executable does not expose a valid minimum macOS version."
 
-stage_root="$(mktemp -d "$output_root/.macos-package.XXXXXX")"
 stage_bundle="$stage_root/$artifact_name.app"
 macos_directory="$stage_bundle/Contents/MacOS"
 resources_directory="$stage_bundle/Contents/Resources"

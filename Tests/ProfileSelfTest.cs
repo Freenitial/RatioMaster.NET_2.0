@@ -177,6 +177,13 @@ internal static class ProfileSelfTest
         Throws(() => Parse("{\"format\":1,\"default\":\"Missing\",\"clients\":[]}"), "Unknown default accepted.");
         string query = ClientCatalog.Create("qBittorrent", "5.1.0").Query.Replace("numwant={numwant}", "numwant=200");
         Throws(() => Parse("{\"format\":1,\"clients\":[{\"family\":\"qBittorrent\",\"version\":\"5.1.0\",\"query\":\"" + query + "\"}]}"), "Literal numwant accepted.");
+        foreach (string invalid in new[]
+        {
+            ClientCatalog.Create("qBittorrent", "5.1.0").Query + "&event=stopped",
+            ClientCatalog.Create("qBittorrent", "5.1.0").Query.Replace("{event}&", "{event}suffix&", StringComparison.Ordinal),
+        })
+            Throws(() => Parse("{\"format\":1,\"clients\":[{\"family\":\"qBittorrent\",\"version\":\"5.1.0\",\"query\":\"" + invalid + "\"}]}"),
+                "Ambiguous announce event accepted: " + invalid);
     }
 
     private static void Limits()

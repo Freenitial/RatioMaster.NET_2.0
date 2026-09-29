@@ -21,11 +21,27 @@ internal static class SessionStore
             return new SessionRepository(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), FileName));
         if (OperatingSystem.IsMacOS())
             return new SessionRepository(Path.Combine(privateRoot, FileName), migrationPath: Path.Combine(AppContext.BaseDirectory, FileName));
-        string location = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
+        string location = DesktopLocation(AppContext.BaseDirectory,
+            OperatingSystem.IsLinux() ? Environment.GetEnvironmentVariable("APPIMAGE") : null,
+            OperatingSystem.IsLinux() ? Environment.GetEnvironmentVariable("APPDIR") : null);
         string normalized = OperatingSystem.IsWindows() ? location.ToUpperInvariant() : location;
         string identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..24];
         return new SessionRepository(Path.Combine(location, FileName),
             Path.Combine(privateRoot, "Portable", identity, FileName), Path.Combine(Path.GetTempPath(), FileName));
+    }
+
+    internal static string DesktopLocation(string baseDirectory, string? appImagePath, string? appDirectory)
+    {
+        string location = Path.TrimEndingDirectorySeparator(Path.GetFullPath(baseDirectory));
+        if (!string.IsNullOrWhiteSpace(appImagePath) && Path.IsPathFullyQualified(appImagePath) && File.Exists(appImagePath)
+            && !string.IsNullOrWhiteSpace(appDirectory) && Path.IsPathFullyQualified(appDirectory) && Directory.Exists(appDirectory))
+        {
+            string mount = Path.TrimEndingDirectorySeparator(Path.GetFullPath(appDirectory));
+            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (location.Equals(mount, comparison) || location.StartsWith(mount + Path.DirectorySeparatorChar, comparison))
+                return Path.GetDirectoryName(Path.GetFullPath(appImagePath))!;
+        }
+        return location;
     }
 
     internal static void Save(SessionData data) => Repository.Save(data);

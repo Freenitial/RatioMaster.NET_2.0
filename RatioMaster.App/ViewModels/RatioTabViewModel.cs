@@ -56,6 +56,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private long lastDownloaded;
     private readonly TransferRateHistory uploadHistory = new(GraphPoints);
     private bool released;
+    private CancellationTokenSource? startPreparation;
     private StopConditionSettings stopCondition = new("When upload >", "1000");
 
     // ── Header / torrent ──
@@ -312,18 +313,20 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     public bool StopUnitVisible => !string.IsNullOrEmpty(StopUnit);
 
-    public bool InputsEnabled => !IsRunning && !IsTransitioning && !IsClosing;
-    public bool CanToggleSession => !IsTransitioning && !IsClosing;
+    public bool InputsEnabled => !released && !IsRunning && !IsPreparing && !IsTransitioning && !IsClosing;
+    public bool CanToggleSession => !released && !IsPreparing && !IsTransitioning && !IsClosing;
     public bool CanManualUpdate => IsRunning && !IsClosing && !IsTransitioning && !IsAnnouncing && !ManualUpdateSending;
     public string PrimaryActionText => !IsRunning ? "START" : IsPaused ? "Resume" : "Pause";
 
     public bool TabIsPaused => IsRunning && (IsPaused || UploadPausedNoLeechers);
     public bool TabIsRunning => IsRunning && !TabIsPaused;
-    public bool TabIsFinished => !IsRunning && !IsTransitioning && HasFinished;
+    public bool TabIsFinished => !IsRunning && !IsPreparing && !IsTransitioning && HasFinished;
     [ObservableProperty] private bool hasFinished;
     partial void OnHasFinishedChanged(bool value) => NotifySessionState();
 
     [ObservableProperty] private bool isClosing;
+    [ObservableProperty] private bool isPreparing;
+    partial void OnIsPreparingChanged(bool value) => NotifySessionState();
     partial void OnIsClosingChanged(bool value) => NotifySessionState();
     [ObservableProperty] private bool isPaused;
     [ObservableProperty] private bool uploadPausedNoLeechers;
@@ -421,7 +424,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         TabAlertLevel.Error => TabDotState.Error,
         TabAlertLevel.Warning => TabDotState.Warning,
         _ => IsRunning && (IsPaused || UploadPausedNoLeechers) ? TabDotState.Warning
-            : IsRunning ? TabDotState.Running : HasFinished && !IsTransitioning ? TabDotState.Finished : TabDotState.Idle,
+            : IsRunning ? TabDotState.Running : HasFinished && !IsPreparing && !IsTransitioning ? TabDotState.Finished : TabDotState.Idle,
     };
 
     partial void OnAlertLevelChanged(TabAlertLevel value) => OnPropertyChanged(nameof(DotState));
@@ -430,7 +433,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     [RelayCommand(CanExecute = nameof(CanToggleSession))]
     private async Task Start()
     {
-        if (IsTransitioning || IsClosing) return;
+        if (!CanToggleSession) return;
         if (IsRunning)
         {
             if (engine.IsPaused) engine.Resume(); else engine.Pause();
@@ -438,6 +441,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             return;
         }
         await pendingStop;
+        if (!CanToggleSession) return;
 
         if (loadedTorrent == null || string.IsNullOrEmpty(Tracker) || string.IsNullOrEmpty(HashHex))
         {
@@ -481,6 +485,36 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         {
             SetAlert(TabAlertLevel.Error, "Enter finite, non-negative upload and download speeds.");
             return;
+        }
+        if (OperatingSystem.IsAndroidVersionAtLeast(37))
+        {
+            using CancellationTokenSource preparation = new();
+            startPreparation = preparation;
+            IsPreparing = true;
+            SessionNetworkDecision decision;
+            try
+            {
+                StatusText = "Checking local network access…";
+                string endpoint = SelectedProxyType == "None" ? trackerUri.DnsSafeHost : ProxyHost;
+                decision = await SessionNetworkAccess.PrepareAsync(endpoint,
+                    UseTcpListener && SelectedProxyType == "None", preparation.Token);
+            }
+            catch (OperationCanceledException) { return; }
+            finally { startPreparation = null; IsPreparing = false; }
+            if (preparation.IsCancellationRequested || released || IsClosing) return;
+            if (decision == SessionNetworkDecision.Cancelled)
+            {
+                StatusText = "Session start cancelled";
+                return;
+            }
+            if (decision == SessionNetworkDecision.DeniedEndpoint)
+            {
+                StatusText = "Local network permission required";
+                SetAlert(TabAlertLevel.Error, "Allow Nearby devices in Android Settings > Apps > RatioMaster.NET > Permissions to use this local tracker or proxy.");
+                return;
+            }
+            if (decision == SessionNetworkDecision.DeniedListener)
+                ShowLocalPeersUnavailable();
         }
         // A new session starts with its own engine and callbacks.
         SetAlert(TabAlertLevel.None, string.Empty);
@@ -592,6 +626,31 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     private static bool ValidRate(string text) => double.IsFinite(text.ParseDoubleOr(double.NaN))
         && text.ParseDoubleOr(-1) >= 0 && text.ParseDoubleOr(0) <= long.MaxValue / (1024.0 * 1024 * 2);
 
+    private static void ShowLocalPeersUnavailable() => NotificationHub.Show("Local peers unavailable",
+        "Public trackers remain available. To allow local peers, enable Nearby devices in Android Settings > Apps > RatioMaster.NET > Permissions.");
+
+    partial void OnUseTcpListenerChanged(bool value)
+    {
+        if (value && IsRunning && SelectedProxyType == "None" && OperatingSystem.IsAndroidVersionAtLeast(37))
+            _ = PrepareListenerAccessAsync();
+    }
+
+    private async Task PrepareListenerAccessAsync()
+    {
+        RatioEngine source = engine;
+        try
+        {
+            SessionNetworkDecision decision = await SessionNetworkAccess.PrepareAsync("127.0.0.1", true, CancellationToken.None);
+            if (!released && IsRunning && UseTcpListener && ReferenceEquals(engine, source)
+                && decision == SessionNetworkDecision.DeniedListener) ShowLocalPeersUnavailable();
+        }
+        catch (Exception exception)
+        {
+            if (!released && IsRunning && ReferenceEquals(engine, source))
+                NotificationHub.Show("Local network access", exception.Message, error: true);
+        }
+    }
+
     [RelayCommand(CanExecute = nameof(InputsEnabled))]
     private void SetDefaults()
     {
@@ -691,6 +750,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             TorrentSize = Format.FileSize(totalLength);
             SmallTorrentWarning = IsSmallTorrent(totalLength);
             StatusText = "Loaded: " + t.Name;
+            SetAlert(TabAlertLevel.None, string.Empty);
 
             // Torrent defined → move the pulse hint onto the Stop-value box.
             if (pulseStage == PulseStage.TorrentFile)
@@ -701,16 +761,8 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         catch (Exception ex)
         {
             // Clear metadata when parsing fails, so the displayed fields match the selected file.
-            loadedTorrent = null;
-            counterInfoHash = string.Empty;
-            ResetCounters();
-            infoHash = [];
-            totalLength = 0;
-            pieceCount = 0;
-            Tracker = string.Empty;
-            HashHex = string.Empty;
-            TorrentSize = string.Empty;
-            SmallTorrentWarning = false;
+            ClearTorrentMetadata();
+            StatusText = "Failed to load torrent: " + ex.Message;
             AppendLog("Failed to load torrent: " + ex.Message);
             SetAlert(TabAlertLevel.Error, "Failed to load torrent: " + ex.Message);
         }
@@ -732,7 +784,8 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             // ignore
         }
 
-        TorrentFilePath = path;
+        if (TorrentFilePath == path) OnTorrentFilePathChanged(path);
+        else TorrentFilePath = path;
     }
 
     /// <summary>Android entry point: the picker returned content with no re-openable path, so we get the raw
@@ -774,35 +827,37 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         return Path.Combine(baseDir, "RatioMaster.NET", "torrents");
     }
 
-    private static string? TryCacheTorrent(byte[] data)
+    internal static string? TryCacheTorrent(byte[] data, string? directory = null)
     {
+        string? temporary = null;
         try
         {
-            string dir = TorrentCacheDir();
+            string dir = directory ?? TorrentCacheDir();
             Directory.CreateDirectory(dir);
 
-            // Key the private copy by CONTENT (SHA-1 of the bytes), NOT the display name: two different
+            // Key the private copy by content, not the display name: two different
             // torrents that happen to share a name (e.g. "download.torrent") must not overwrite each other's
             // cache — else a restored tab would silently reload the wrong torrent and announce the wrong
             // info-hash. Identical re-picks map to the same file (dedup). Hex is always a safe filename.
-            string cache = Path.Combine(dir, Convert.ToHexString(SHA1.HashData(data)) + ".torrent");
-            if (!File.Exists(cache))
+            byte[] digest = SHA256.HashData(data);
+            string cache = Path.Combine(dir, Convert.ToHexString(digest) + ".torrent");
+            bool reusable = false;
+            if (File.Exists(cache))
             {
-                File.WriteAllBytes(cache, data);
+                using FileStream existing = File.OpenRead(cache);
+                reusable = existing.Length == data.Length && SHA256.HashData(existing).AsSpan().SequenceEqual(digest);
+            }
+            if (reusable)
+            {
+                try { File.SetLastWriteTimeUtc(cache, DateTime.UtcNow); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
             else
             {
-                // Same content re-picked: refresh the timestamp so pruning treats it as recent. In its OWN
-                // try — a failed touch (read-only FS, clock issue) must not fall through to the outer catch
-                // and discard a cache path that is perfectly valid and already on disk.
-                try
-                {
-                    File.SetLastWriteTimeUtc(cache, DateTime.UtcNow);
-                }
-                catch
-                {
-                    // cosmetic only: the file just sorts as older for pruning purposes
-                }
+                temporary = cache + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllBytes(temporary, data);
+                File.Move(temporary, cache, overwrite: true);
             }
 
             PruneTorrentCache(dir, cache);
@@ -811,6 +866,15 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         catch
         {
             return null; // no private copy → the current session still works, just no reload after restart
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                try { File.Delete(temporary); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
     }
 
@@ -881,6 +945,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     public async Task StopIfRunningAsync()
     {
+        startPreparation?.Cancel();
         if (IsTransitioning) { await pendingStop; return; }
         if (!IsRunning) { await pendingStop; return; }
         IsTransitioning = true;
@@ -905,6 +970,12 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
         resumeUploaded = resumeDownloaded = lastUploaded = lastDownloaded = 0;
         UploadedText = DownloadedText = "0 bytes";
         RatioText = "0.00";
+        SeedersText = "Seeders: -";
+        LeechersText = "Leechers: -";
+        TotalTimeText = "00:00";
+        TimerText = "idle";
+        NextUpdateCountdown = "00:00:00";
+        RemainingText = "0";
         uploadHistory.Reset(0);
         GraphValues = uploadHistory.Snapshot();
     }
@@ -929,8 +1000,10 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
     public void ReleaseResources()
     {
         released = true;
+        startPreparation?.Cancel();
         terminalBuffer.Clear();
         SetTorrentSource(null);
+        NotifySessionState();
     }
 
     // ══════════════════════ Session persistence ══════════════════════
@@ -1231,6 +1304,7 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
 
     partial void OnTorrentFilePathChanged(string value)
     {
+        if (suppressTorrentReset) return;
         HasFinished = false;
         if (!string.IsNullOrWhiteSpace(value)
             && value.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase)
@@ -1246,19 +1320,22 @@ public partial class RatioTabViewModel : ObservableObject, IEngineHost
             SetPulseStage(PulseStage.TorrentFile); // guide (re)loading a torrent
         }
 
-        // Android's SetTorrentContent assigns the display NAME here and loads from bytes immediately after —
-        // that isn't a clear, so leave the state alone (the flag is set only around that assignment).
-        if (suppressTorrentReset)
-        {
-            return;
-        }
-
         // Clearing the path also clears the source and displayed torrent metadata.
         SetTorrentSource(null);
+        ClearTorrentMetadata();
+        StatusText = "Select a valid torrent file";
+        SetAlert(TabAlertLevel.None, string.Empty);
+    }
+
+    private void ClearTorrentMetadata()
+    {
+        HasFinished = false;
         loadedTorrent = null;
         counterInfoHash = string.Empty;
         ResetCounters();
         infoHash = [];
+        totalLength = 0;
+        pieceCount = 0;
         Tracker = string.Empty;
         HashHex = string.Empty;
         TorrentSize = string.Empty;

@@ -30,6 +30,8 @@ internal static class EngineLifecycleSelfTest
         }
 
         await Check("failed initial announce retries started without growing counters", RetryStartedAsync);
+        await Check("initial progress preserves the full signed torrent-size range", InitialProgressAsync);
+        await Check("peer log summaries bound allocation and preserve counts and byte order", PeerSummariesAsync);
         await Check("interval bounds and accepted minimum survive transport errors", IntervalBoundsAsync);
         await Check("tracker minima beyond one day delay regular announces until their deadline", LongTrackerMinimumAsync);
         await Check("unrepresentable tracker delays stop without an early automatic retry", UnsupportedTrackerDelayAsync);
@@ -44,6 +46,72 @@ internal static class EngineLifecycleSelfTest
         await Check("listener collision, hash isolation and live cancellation", ListenerIsolationAsync);
         await Check("HTTP fragment removal, scrape, tracker ID, warnings and decode diagnostics", TrackerMetadataAsync);
         return passed;
+    }
+
+    private static async Task InitialProgressAsync()
+    {
+        foreach ((double percent, long expected) in new[] { (0d, 0L), (50d, long.MaxValue / 2), (100d, long.MaxValue) })
+        {
+            RatioEngine engine = new(new Host(), new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false);
+            try
+            {
+                engine.Start(Configuration(total: long.MaxValue, finished: percent));
+                await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+                EngineStats stats = engine.GetStats();
+                Require(stats.Downloaded == expected && stats.Left == long.MaxValue - expected,
+                    "Initial progress must not lose bytes or overflow at the engine size limit.");
+            }
+            finally { await engine.StopAsync(); }
+        }
+
+        foreach (double invalid in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            RatioEngine engine = new(new Host(), new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false);
+            bool rejected = false;
+            try { engine.Start(Configuration(finished: invalid)); }
+            catch (ArgumentException) { rejected = true; }
+            finally { await engine.StopAsync(); }
+            Require(rejected && !engine.IsRunning, "A nonfinite percentage must be rejected before the session starts.");
+        }
+    }
+
+    private static Task PeerSummariesAsync()
+    {
+        const int count = 100000;
+        foreach (int addressBytes in new[] { 4, 16 })
+        {
+            int stride = addressBytes + 2;
+            byte[] bytes = new byte[count * stride];
+            for (int offset = 0; offset < bytes.Length; offset += stride)
+            {
+                bytes[offset + addressBytes - 1] = 1;
+                bytes[offset + addressBytes] = 0xC8;
+                bytes[offset + addressBytes + 1] = 0xD5;
+            }
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            string summary = PeerList.FormatCompact(bytes, addressBytes);
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Require(summary.StartsWith("(100000) ", StringComparison.Ordinal)
+                && summary.Count(character => character == ';') == 5
+                && summary.Contains(addressBytes == 4 ? "0.0.0.1:51413" : "[::1]:51413", StringComparison.Ordinal),
+                "Compact peer logging must keep the total count and five correctly decoded examples.");
+            Require(allocated < 65536, "Compact peer summaries must not allocate an object for every returned peer.");
+        }
+        ValueList dictionaryPeers = new();
+        for (int index = 0; index < 7; index++)
+        {
+            ValueDictionary peer = new();
+            peer.SetStringValue("ip", "127.0.0.1");
+            peer["port"] = new ValueNumber(51413);
+            dictionaryPeers.Add(peer);
+        }
+        dictionaryPeers.Add(new ValueNumber(0));
+        string dictionarySummary = PeerList.FormatDictionary(dictionaryPeers);
+        Require(dictionarySummary.StartsWith("(7) ", StringComparison.Ordinal)
+            && dictionarySummary.Count(character => character == ';') == 5
+            && dictionarySummary.Contains("127.0.0.1:51413", StringComparison.Ordinal),
+            "Dictionary peer summaries must count valid entries and retain host-order ports.");
+        return Task.CompletedTask;
     }
 
     private static async Task RetryStartedAsync()

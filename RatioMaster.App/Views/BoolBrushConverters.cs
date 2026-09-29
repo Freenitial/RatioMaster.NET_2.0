@@ -18,7 +18,7 @@ public static class BoolBrushConverters
     public static readonly IValueConverter RunningDot =
         new FuncValueConverter<bool, IBrush>(running => running ? Running : Idle);
 
-    /// <summary>Tab dot: grey idle, green running, yellow warning, red error.</summary>
+    /// <summary>Tab dot: grey idle, blue running, green finished, yellow warning, red error.</summary>
     public static readonly IValueConverter TabDot =
         new FuncValueConverter<TabDotState, IBrush>(state => state switch
         {

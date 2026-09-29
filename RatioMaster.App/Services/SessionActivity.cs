@@ -34,16 +34,15 @@ internal static class SessionActivity
 
     internal static void Exited()
     {
-        // Clamp at zero: an unbalanced Exited (a stop path that runs twice) must not drive the count
-        // negative, which would then swallow the next Entered and leave the service unstarted.
-        int now = Interlocked.Decrement(ref running);
-        if (now < 0)
+        int previous;
+        do
         {
-            Interlocked.Exchange(ref running, 0);
-            return;
+            previous = Volatile.Read(ref running);
+            if (previous == 0) return;
         }
+        while (Interlocked.CompareExchange(ref running, previous - 1, previous) != previous);
 
-        if (now == 0)
+        if (previous == 1)
         {
             ActiveChanged?.Invoke(false);
         }

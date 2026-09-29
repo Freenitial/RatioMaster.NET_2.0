@@ -12,7 +12,7 @@ RatioMaster.NET reports simulated upload/download figures to a tracker. No torre
 
 | Platform | Package |
 |---|---|
-| Windows x64 / ARM64 | Native AOT EXE with statically linked Skia and HarfBuzz |
+| Windows x64 / ARM64 | Signed Native AOT EXE with statically linked Skia and HarfBuzz |
 | Linux x86_64 / aarch64 | Native AOT AppImage |
 | Android | APK |
 | macOS x64 / ARM64 | Local Native AOT application bundle; build on a Mac |
@@ -26,6 +26,8 @@ Local release builds are written to `Installer/Output`. Windows graphics librari
 3. Choose a stop condition and press **START**.
 
 Each tab owns its torrent, identity, counters and announce schedule. Pause/Resume keeps the identity stable and scheduled tracker updates active. Upload also pauses when the tracker reports no leechers and resumes through normal announces; a manual pause remains independent. Random controls remain separate for upload and download.
+
+On Android 17, local trackers, local proxies and incoming LAN peers require the Nearby devices permission. The app requests it when starting a session that needs it. Refusing local peer access still permits public tracker traffic; local trackers or proxies require permission through Android app settings before they can start.
 
 A tracker refusal stops the affected tab. Temporary transport errors preserve pending announce events for retry. Manual update requires confirmation; tracker timings and refusal messages must still be respected.
 
@@ -41,7 +43,7 @@ Shortcuts: Ctrl+O opens a torrent; Ctrl+T adds a tab; Ctrl+W closes the current 
 
 ## Saved settings
 
-Windows and Linux portable settings stay beside the executable. An installation-specific local application-data directory is used if that location cannot be written. macOS keeps settings outside the signed app bundle; Android uses private app storage.
+Windows and Linux portable settings stay beside the executable. For an AppImage, that location is the folder containing the AppImage file, independent of its temporary mount directory. An installation-specific local application-data directory is used if that location cannot be written. macOS keeps settings outside the signed app bundle; Android uses private app storage.
 
 Saves use atomic replacement and a previous-snapshot backup. Setting changes and final torrent counters are preserved. A session in an ambiguous shared temporary folder is reported and left intact rather than assigned to another installation. Existing custom identities are retained; values whose origin cannot be established are treated as custom.
 
@@ -115,7 +117,7 @@ The rules draw on [upstream client definitions](https://github.com/NikolayIT/Rat
 
 ## Build and validation
 
-Use the .NET 11 SDK selected by `global.json`; Avalonia remains on stable 12.0.5.
+Use the .NET 11 RC1 SDK selected by `global.json` (`11.0.100-rc.1.26425.128`). RC1 is an official prerelease with go-live support, not a nightly build. Avalonia uses stable 12.1.3 with SkiaSharp 3.119.4; Windows x64 and ARM64 share the Optris 3.119.4.1 static software-rendering provider. SkiaSharp 4 is not substituted across the Avalonia/static-library ABI. CommunityToolkit.Mvvm remains on stable 8.4.2.
 
 ```sh
 dotnet run --project RatioMaster.App
@@ -130,13 +132,37 @@ Installer\build_RatioMaster_setup.bat --headless --winx64 --winarm64 --apk --lin
 
 Use `--check-tools` for a preflight without compilation, `--aot` for a bare x64 publish, and `--aab` for an Android App Bundle. An Android signing keystore can be supplied with `RM_ANDROID_KEYSTORE`, `RM_ANDROID_KEYSTORE_PASS`, `RM_ANDROID_KEY_ALIAS` and `RM_ANDROID_KEY_PASS`; otherwise a debug keystore is used. A debug-signed AAB is not suitable for Google Play.
 
-Canonical output directories are `RatioMaster.App/publish/<RID>` and `Installer/Output`. Linux uses existing WSL native tools and appimagetool; missing prerequisites have an explicit self-contained JIT/archive fallback.
+Published Windows executables carry timestamped Authenticode signatures. Local builds require a separate signing step with your code-signing certificate; generate distribution checksums after signing.
+
+`Directory.Build.props` centralizes compilation files under `artifacts/`. `Installer/Output` contains the final distribution packages and checksums.
+
+| Location | Contents |
+|---|---|
+| `artifacts/bin` | Compiled applications, organized by project/configuration/platform |
+| `artifacts/obj` | Compiler, restore and native-link intermediate files |
+| `artifacts/publish` | Distribution staging; the Windows builder uses one directory per RID |
+| `artifacts/logs` | Build and validation logs, plus archived maintenance evidence |
+| `Installer/Scripts` | Build and packaging implementation |
+| `Installer/Tests` | Packaging and process-runner regression scripts |
+| `Installer/Data` | AppImage launcher and desktop-entry source files |
+| `Installer/Output` | Final EXE, APK, AppImage and checksum files |
+
+The entry point remains `Installer/build_RatioMaster_setup.bat`. Windows native builds select the latest installed compatible Visual Studio C++ tools, including Build Tools 2026. Android target/minimum API levels come from the project SDK and `SupportedOSPlatformVersion`; packaging does not rewrite the source manifest. A portable application run from a build directory can save `ratiomaster.session` beside itself; preserve those files before clearing build output.
+
+Linux AppImages are compiled on Ubuntu 22.04 (glibc 2.35), the catalog's test baseline. Building Native AOT on a newer distribution can introduce newer libc symbols even when the .NET application is self-contained. Packaging checks the executable, native libraries and AppImage runtime for the correct architecture and a maximum GLIBC_2.35 requirement, then runs the runtime diagnostic on native-host builds. AppImage tools have fixed versions and SHA-256 checksums.
+
+```sh
+bash Installer/Scripts/package_linux.sh linux-x64
+bash Installer/Scripts/package_linux.sh linux-arm64
+```
+
+Use a prepared Ubuntu 22.04 environment with clang, zlib development files, binutils, curl, desktop-file-utils and the selected .NET SDK. ARM64 cross-compilation from x64 also requires its cross compiler and development libraries. The Windows builder selects `Ubuntu-22.04`, or the distribution named by `RM_WSL_DISTRO`. Missing prerequisites produce an explicitly labelled self-contained JIT archive; a compilation or ABI failure stops packaging. Headless AppImage packaging requires the verified tools to be cached; the direct Linux script can download them.
 
 On macOS, with Xcode command-line tools:
 
 ```sh
-bash Installer/package_macos.sh osx-arm64
-bash Installer/package_macos.sh osx-x64
+bash Installer/Scripts/package_macos.sh osx-arm64
+bash Installer/Scripts/package_macos.sh osx-x64
 ```
 
 This creates a Native AOT `.app`, ZIP and SHA-256 file. Its ad hoc signature is checked locally; it is not Developer ID signing or notarisation. An existing destination bundle is not overwritten.
@@ -144,15 +170,15 @@ This creates a Native AOT `.app`, ZIP and SHA-256 file. Its ad hoc signature is 
 Regression tests live in `Tests/`, compile only into desktop Debug builds and use local fixtures. They protect protocol handling, saved settings, independent tabs and responsive layouts. Keep them even when feature development slows down:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Installer\validate_RatioMaster.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Installer\Scripts\validate_RatioMaster.ps1
 ```
 
-On Linux/macOS, run the same script with PowerShell 7 (`pwsh`). It builds and executes suites sequentially for the host architecture, isolates temporary data and writes ignored logs under `Installer/Output/validation`. The GitHub workflow uses separate Windows/Linux/macOS jobs. Do not run builds sharing the same `obj` concurrently.
+On Linux/macOS, run the same script with PowerShell 7 (`pwsh`). It builds and executes suites sequentially for the host architecture, isolates temporary data and writes ignored logs under `artifacts/logs/validation`. The GitHub workflow uses separate Windows/Linux/macOS jobs. Do not run builds sharing the same `obj` concurrently.
 
 A small `--runtime-selftest` diagnostic remains in desktop release binaries to check native graphics, embedded release history and serialization without opening sessions or using the network. Compilation and this diagnostic do not replace Android/ARM64 device testing or a macOS run.
 
 ## Release history and credits
 
-See [CHANGELOG.md](CHANGELOG.md). The next release description is prepared in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+See [CHANGELOG.md](CHANGELOG.md) for the full history and [RELEASE_NOTES.md](RELEASE_NOTES.md) for the current release notes.
 
 MIT — see [LICENSE](LICENSE). Originally by [NikolayIT](https://github.com/NikolayIT), HTTPS/TLS work by [HdiaSaad](https://github.com/HdiaSaad), and this fork by Freenitial. Recent upstream development was reviewed and adapted while retaining this fork's tabbed interface and standalone emulation.

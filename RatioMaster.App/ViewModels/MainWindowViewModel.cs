@@ -18,6 +18,8 @@ public partial class MainWindowViewModel : ObservableObject
     private RatioTabViewModel? selectedTab;
 
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(AddTabCommand))]
+    [NotifyPropertyChangedFor(nameof(CanAddTab))]
     private bool isShuttingDown;
 
     private int tabCounter;
@@ -31,10 +33,16 @@ public partial class MainWindowViewModel : ObservableObject
 
     internal CloseBehavior CloseBehavior { get; set; } = CloseBehavior.Ask;
 
-    public bool HasActiveSessions => Tabs.Any(tab => tab.IsRunning || tab.IsTransitioning || tab.IsClosing);
+    public bool HasActiveSessions => Tabs.Any(tab => tab.IsRunning || tab.IsPreparing || tab.IsTransitioning || tab.IsClosing);
+    public bool CanAddTab => !IsShuttingDown && Tabs.Count < SessionRepository.MaxTabs;
 
     public MainWindowViewModel(bool usePersistence = true)
     {
+        Tabs.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(CanAddTab));
+            AddTabCommand.NotifyCanExecuteChanged();
+        };
         persistenceEnabled = usePersistence;
         if (usePersistence) StartupWarning = ClientCatalog.LoadUserProfiles(System.IO.Path.Combine(SessionStore.SettingsDirectory, "clients.json"));
         SessionData? session = usePersistence ? SessionStore.Load() : null;
@@ -119,10 +127,10 @@ public partial class MainWindowViewModel : ObservableObject
 
     public string LocalIp => NetInfo.GetLocalIp();
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanAddTab))]
     private void AddTab()
     {
-        if (IsShuttingDown)
+        if (!CanAddTab)
         {
             return;
         }
@@ -207,7 +215,8 @@ public partial class MainWindowViewModel : ObservableObject
             or "SelectedProxyType" or "ProxyHost" or "ProxyUser" or "ProxyPass" or "ProxyPort"
             or "EnableLog" or "IsRunning" or "IsPaused" or "IsTransitioning" or "HasFinished") RequestSave();
         if (string.IsNullOrEmpty(e.PropertyName)
-            || e.PropertyName is nameof(RatioTabViewModel.IsRunning) or nameof(RatioTabViewModel.IsTransitioning) or nameof(RatioTabViewModel.IsClosing))
+            || e.PropertyName is nameof(RatioTabViewModel.IsRunning) or nameof(RatioTabViewModel.IsPreparing)
+                or nameof(RatioTabViewModel.IsTransitioning) or nameof(RatioTabViewModel.IsClosing))
         {
             OnPropertyChanged(nameof(HasActiveSessions));
         }

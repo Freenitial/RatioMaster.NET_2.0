@@ -25,9 +25,10 @@ public enum TabDotState
     /// <summary>Grey: idle.</summary>
     Idle,
 
+    /// <summary>Green: the objective and final announce completed successfully.</summary>
     Finished,
 
-    /// <summary>Green: running normally.</summary>
+    /// <summary>Blue: running normally.</summary>
     Running,
 
     /// <summary>Yellow: running with a warning.</summary>

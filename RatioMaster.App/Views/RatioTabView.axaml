@@ -212,7 +212,7 @@
             <TextBox   Grid.Row="1" Grid.Column="3" Width="74" Text="{Binding CustomPeers}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
           </Grid>
           <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-            <CheckBox Grid.Column="0" VerticalAlignment="Center" Content="Realistic mode" IsChecked="{Binding RealisticMode}"
+            <CheckBox Grid.Column="0" VerticalAlignment="Center" Content="Realistic mode" IsChecked="{Binding RealisticMode}" IsEnabled="{Binding InputsEnabled}"
                       ToolTip.Tip="Answers connecting peers with a real BitTorrent handshake + a full bitfield, so the session looks like a genuine seeder on the wire. Speed variation is controlled by the Random checkboxes in Speed options."/>
             <Button Grid.Column="1" Content="Regenerate" Classes="ghost" Command="{Binding RegenerateValuesCommand}" IsEnabled="{Binding InputsEnabled}" ToolTip.Tip="Generate a new client key and peer ID."/>
           </Grid>
@@ -232,7 +232,7 @@
           <TextBlock Classes="grouphead" Text="Other settings"/>
           <!-- WrapPanel so the checkboxes wrap onto new lines when narrow instead of overflowing to the right. -->
           <WrapPanel>
-            <CheckBox Content="Use TCP listener" Margin="0,0,18,4" IsChecked="{Binding UseTcpListener}" ToolTip.Tip="Listen for incoming BitTorrent connections on the configured port. Another application using that port prevents the listener from opening."/>
+            <CheckBox Content="Use TCP listener" Margin="0,0,18,4" IsChecked="{Binding UseTcpListener}" IsEnabled="{Binding CanToggleSession}" ToolTip.Tip="Listen for incoming BitTorrent connections on the configured port. Another application using that port prevents the listener from opening."/>
             <CheckBox Content="Request scrape" Margin="0,0,18,4" IsChecked="{Binding RequestScrape}" ToolTip.Tip="Request seeder and leecher counts from the tracker when the announce response does not include them. Some trackers do not support scrape."/>
           </WrapPanel>
         </StackPanel>

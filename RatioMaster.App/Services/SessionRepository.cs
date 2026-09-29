@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 internal sealed class SessionRepository(string primaryPath, string? fallbackPath = null, string? legacyPath = null, string? migrationPath = null)
 {
     internal const int MaxFileBytes = 16 * 1024 * 1024;
+    internal const int MaxTabs = 512;
     private readonly object sync = new();
     private long requestedRevision;
     private readonly HashSet<string> damagedPaths = new(StringComparer.Ordinal);
@@ -36,7 +37,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
 
     private static string Encode(SessionData data)
     {
-        if (data.Tabs is null || data.Tabs.Count > 512) throw new IOException("A saved session supports at most 512 tabs.");
+        if (data.Tabs is null || data.Tabs.Count > MaxTabs) throw new IOException($"A saved session supports at most {MaxTabs} tabs.");
         string json = JsonSerializer.Serialize(data, AppJsonContext.Default.SessionData);
         if (Encoding.UTF8.GetByteCount(json) > MaxFileBytes) throw new IOException("The saved session exceeds the 16 MiB limit.");
         return json;
@@ -124,7 +125,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
         SessionData data = JsonSerializer.Deserialize(json, AppJsonContext.Default.SessionData)
             ?? throw new JsonException("The session is empty.");
         if (data.FormatVersion is < 1 or > 2) throw new JsonException("This session format is not supported.");
-        if (data.Tabs is null || data.Tabs.Count > 512) throw new JsonException("Invalid session tab list.");
+        if (data.Tabs is null || data.Tabs.Count > MaxTabs) throw new JsonException("Invalid session tab list.");
         JsonElement.ArrayEnumerator rawTabs = default;
         bool hasRawTabs = document.RootElement.TryGetProperty("Tabs", out JsonElement tabs) && tabs.ValueKind == JsonValueKind.Array;
         if (hasRawTabs) rawTabs = tabs.EnumerateArray();

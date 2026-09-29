@@ -180,6 +180,9 @@ internal static class ClientCatalogLoader
         foreach (string required in new[] { "infohash", "peerid", "port", "uploaded", "downloaded", "left", "key", "event" })
             if (query.Split("{" + required + "}", StringSplitOptions.None).Length != 2)
                 throw Invalid("The query must contain {" + required + "} exactly once.");
+        int eventEnd = query.IndexOf("{event}", StringComparison.Ordinal) + "{event}".Length;
+        if (eventEnd < query.Length && query[eventEnd] != '&')
+            throw Invalid("{event} must be followed by a parameter separator or the end of the query.");
         HashSet<string> parameters = new(StringComparer.Ordinal);
         foreach (string parameter in query.Replace("{event}", "", StringComparison.Ordinal).Split('&'))
         {
@@ -187,6 +190,7 @@ internal static class ClientCatalogLoader
             if (separator < 1) throw Invalid("Every query parameter must have a name and a value.");
             string name = parameter[..separator];
             if (!name.All(IsLabelByte) || !parameters.Add(name)) throw Invalid("Invalid or duplicate query parameter: " + name);
+            if (name == "event") throw Invalid("The event parameter must be supplied only by {event}.");
             if (name == "numwant" && parameter[(separator + 1)..] != "{numwant}")
                 throw Invalid("numwant must use {numwant} so stop announcements can request zero peers.");
         }

@@ -1,8 +1,10 @@
 namespace RatioMaster.Services;
 
 using System;
+using System.IO;
 using System.IO.Pipes;
 using System.Threading;
+using System.Threading.Tasks;
 
 /// <summary>
 /// Keeps RatioMaster to ONE process per user session. A second process is never what the user wants here:
@@ -15,8 +17,8 @@ using System.Threading;
 /// </summary>
 internal static class SingleInstance
 {
-    // Unprefixed name = per-session on Windows (a second user gets their own instance, which is correct);
-    // on Unix .NET backs both primitives with files under the temp dir, so the same scoping applies.
+    // Windows scopes the unprefixed mutex name to the interactive session.
+    // Pipe connections are restricted to the current user.
     private const string MutexName = "RatioMaster.NET.instance";
     private const string PipeName = "RatioMaster.NET.activate";
 
@@ -36,10 +38,15 @@ internal static class SingleInstance
 
             return createdNew;
         }
-        catch
+        catch (PlatformNotSupportedException)
         {
             // Platforms without named mutex support allow startup without instance coordination.
             return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("Unable to coordinate the application instance: " + exception.Message);
+            return false;
         }
     }
 
@@ -49,7 +56,7 @@ internal static class SingleInstance
     {
         try
         {
-            using NamedPipeClientStream client = new(".", PipeName, PipeDirection.Out);
+            using NamedPipeClientStream client = new(".", PipeName, PipeDirection.Out, PipeOptions.CurrentUserOnly);
             client.Connect(2000);
             client.WriteByte(1);
             client.Flush();
@@ -66,32 +73,57 @@ internal static class SingleInstance
     /// </summary>
     internal static void StartListener(Action onActivate)
     {
-        Thread listener = new(() =>
+        _ = Task.Run(async () =>
         {
-            while (true)
+            try
             {
-                try
+                await ListenAsync(PipeName, onActivate, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                Console.Error.WriteLine("Unable to listen for application activation: " + exception.Message);
+            }
+        });
+    }
+
+    internal static async Task ListenAsync(string pipeName, Action onActivate, CancellationToken cancellationToken,
+        Action? onListening = null)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            // Endpoint creation failures escape the loop; only individual client failures are retried.
+            using NamedPipeServerStream server = new(pipeName, PipeDirection.In, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            onListening?.Invoke();
+            try
+            {
+                await server.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
+                using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(TimeSpan.FromSeconds(2));
+                if (await ReadActivationAsync(server, deadline.Token).ConfigureAwait(false)) onActivate();
+            }
+            catch (OperationCanceledException)
+            {
+                // An idle client expires independently of cancellation of the listener itself.
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // A client can close before acceptance or disconnect while its signal is being read.
+            }
+            finally
+            {
+                if (server.IsConnected)
                 {
-                    // Recreated per connection: a NamedPipeServerStream serves exactly one client.
-                    using NamedPipeServerStream server = new(PipeName, PipeDirection.In, 1);
-                    server.WaitForConnection();
-                    if (server.ReadByte() >= 0)
-                    {
-                        onActivate();
-                    }
-                }
-                catch
-                {
-                    // Don't let a transient pipe error spin this thread at 100% CPU.
-                    Thread.Sleep(500);
+                    try { server.Disconnect(); }
+                    catch (IOException) { }
                 }
             }
-        })
-        {
-            IsBackground = true,
-            Name = "single-instance-listener",
-        };
+        }
+    }
 
-        listener.Start();
+    internal static async Task<bool> ReadActivationAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        byte[] signal = new byte[1];
+        return await stream.ReadAsync(signal, cancellationToken).ConfigureAwait(false) == 1 && signal[0] == 1;
     }
 }

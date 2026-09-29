@@ -17,9 +17,7 @@ internal sealed class ValueDictionary : IBEncodeValue
     {
         Collection<byte> collection = [(byte)'d'];
 
-        // Re-encode keys in the order they were parsed. Valid torrents store the
-        // "info" dictionary with keys already sorted, so preserving insertion
-        // order reproduces the original bytes and keeps the SHA-1 info_hash valid.
+        // Preserve insertion order. Metainfo hashes use the original source bytes in TorrentBencodeReader.
         foreach (string key in dict.Keys)
         {
             foreach (byte b in new ValueString(key).Encode())
@@ -43,15 +41,18 @@ internal sealed class ValueDictionary : IBEncodeValue
     {
         for (byte b = BEncode.ReadByteChecked(s); b != 0x65; b = BEncode.ReadByteChecked(s))
         {
-            if (!char.IsNumber((char)b))
+            if (b < (byte)'0' || b > (byte)'9')
             {
                 throw new TorrentException("Key expected to be a string.");
             }
 
             ValueString keyString = new();
+            BEncode.CountNode();
             keyString.Parse(s, b);
+            if (dict.ContainsKey(keyString.String))
+                throw new TorrentException("Bencoded dictionary keys must be unique.");
             IBEncodeValue value = BEncode.Parse(s);
-            dict[keyString.String] = value;
+            dict.Add(keyString.String, value);
         }
     }
 

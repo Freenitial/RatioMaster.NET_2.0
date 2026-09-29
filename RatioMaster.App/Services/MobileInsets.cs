@@ -8,10 +8,8 @@ using Avalonia;
 /// home-gesture zone) from the Android head to the shared <see cref="RatioMaster.Views.MainView"/>, in
 /// PHYSICAL pixels.
 ///
-/// <para>We do NOT rely on Avalonia 12's <c>InsetsManager.SafeAreaPadding</c> on Android (it applies insets
-/// inconsistently and mis-measures — it was double-stacking with our own padding, giving a big top gap).
-/// Instead the Android activity installs an AndroidX <c>WindowInsetsCompat</c> listener (works back to
-/// API 21, unlike the platform API-30 <c>GetInsets</c>), reads the REAL per-orientation insets, forwards
+/// <para>The Android activity installs an AndroidX <c>WindowInsetsCompat</c> listener (works back to
+/// API 21, unlike the platform API-30 <c>GetInsets</c>), reads the per-orientation insets, forwards
 /// them here without consuming them, and the view lays the UI out inside the safe area itself (root sets
 /// <c>TopLevel.AutoSafeAreaPadding=False</c>).</para>
 ///

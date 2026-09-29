@@ -7,9 +7,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$installerRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$repositoryRoot = [IO.Path]::GetFullPath((Join-Path $installerRoot '..'))
 $projectPath = Join-Path $repositoryRoot 'RatioMaster.App/RatioMaster.App.csproj'
-$outputRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Output'))
+$outputRoot = Join-Path $installerRoot 'Output'
+$logRoot = Join-Path $repositoryRoot 'artifacts/logs'
 $dotnetCommand = Get-Command 'dotnet' -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $dotnetPath = $dotnetCommand.Source
 $runningOnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
@@ -117,7 +119,7 @@ try {
         throw ('Validation executes the built program and requires the dotnet host RID {0}; requested {1}.' -f $nativeRid, $DesktopRid)
     }
 
-    $script:ValidationLogDirectory = Join-Path $outputRoot ('validation/' + $DesktopRid)
+    $script:ValidationLogDirectory = Join-Path $logRoot ('validation/' + $DesktopRid)
     [IO.Directory]::CreateDirectory($script:ValidationLogDirectory) | Out-Null
     [IO.File]::WriteAllText((Join-Path $script:ValidationLogDirectory 'dotnet-info.log'), $information, (New-Object Text.UTF8Encoding($false)))
     $scratchPath = [IO.Path]::GetFullPath((Join-Path $script:ValidationLogDirectory ('work-' + [Guid]::NewGuid().ToString('N'))))
@@ -127,8 +129,8 @@ try {
     }
 
     $buildProperties = @("-p:DesktopRid=$DesktopRid", '-p:IncludeAndroid=false')
-    Invoke-CheckedDotnet -Arguments (@('build', $projectPath, '-c', 'Debug', '--nologo') + $buildProperties) -LogName 'build.log'
-    $targetLines = Invoke-CheckedDotnet -Arguments (@('msbuild', $projectPath, '-nologo', '-getProperty:TargetPath', '-p:Configuration=Debug') + $buildProperties) -LogName 'target-path.log' -ReturnOutput
+    Invoke-CheckedDotnet -Arguments (@('build', $projectPath, '-c', 'Debug', '--nologo', '--disable-build-servers') + $buildProperties) -LogName 'build.log'
+    $targetLines = Invoke-CheckedDotnet -Arguments (@('msbuild', $projectPath, '-nologo', '-nr:false', '-getProperty:TargetPath', '-p:Configuration=Debug') + $buildProperties) -LogName 'target-path.log' -ReturnOutput
     $targetPath = ($targetLines -join [Environment]::NewLine).Trim()
     if (-not [IO.File]::Exists($targetPath)) {
         throw ('The Debug assembly was not produced: ' + $targetPath)
@@ -137,7 +139,6 @@ try {
     Invoke-CheckedDotnet -Arguments @($targetPath, '--selftest') -LogName 'selftest.log'
     Invoke-CheckedDotnet -Arguments @($targetPath, '--ui-selftest') -LogName 'ui-selftest.log'
     Invoke-CheckedDotnet -Arguments @($targetPath, '--runtime-selftest') -LogName 'runtime-selftest.log'
-    Write-Host ('Validation passed for {0}. Logs: {1}' -f $DesktopRid, $script:ValidationLogDirectory)
     $exitStatus = 0
 }
 catch {
@@ -148,10 +149,17 @@ finally {
         [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
     }
     if ($scratchPath -and [IO.Directory]::Exists($scratchPath)) {
-        $resolvedScratch = [IO.Path]::GetFullPath($scratchPath)
-        $allowedPrefix = [IO.Path]::GetFullPath($script:ValidationLogDirectory) + [IO.Path]::DirectorySeparatorChar
-        if ($resolvedScratch.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -LiteralPath $resolvedScratch -Recurse -Force -ErrorAction Continue
+        try {
+            $resolvedScratch = [IO.Path]::GetFullPath($scratchPath)
+            $allowedPrefix = [IO.Path]::GetFullPath($script:ValidationLogDirectory) + [IO.Path]::DirectorySeparatorChar
+            if (-not $resolvedScratch.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Refusing to remove an unexpected validation scratch directory.'
+            }
+            Remove-Item -LiteralPath $resolvedScratch -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            $exitStatus = 1
+            Write-Error -Message ('Validation cleanup failed: ' + $_.Exception.Message) -ErrorAction Continue
         }
     }
     if ($validationLock) {
@@ -169,6 +177,9 @@ finally {
     if ($locationPushed) {
         Pop-Location
     }
+}
+if ($exitStatus -eq 0) {
+    Write-Host ('Validation passed for {0}. Logs: {1}' -f $DesktopRid, $script:ValidationLogDirectory)
 }
 exit $exitStatus
 

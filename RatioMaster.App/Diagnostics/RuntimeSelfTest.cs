@@ -32,7 +32,13 @@ internal static class RuntimeSelfTest
             bitmap.Erase(SkiaSharp.SKColors.Black);
             if (bitmap.GetPixel(0, 0) != SkiaSharp.SKColors.Black)
                 throw new InvalidOperationException("Native graphics initialization failed.");
-            Console.WriteLine("Runtime checks passed: profiles, serialization and native graphics. No user data or network used.");
+            const string sample = "RatioMaster";
+            using HarfBuzzSharp.Buffer text = new();
+            text.AddUtf8(sample);
+            text.GuessSegmentProperties();
+            if (text.Length != sample.Length)
+                throw new InvalidOperationException("Native text initialization failed.");
+            Console.WriteLine("Runtime checks passed: profiles, serialization, Skia and HarfBuzz. No user data or network used.");
             return 0;
         }
         catch (Exception ex)

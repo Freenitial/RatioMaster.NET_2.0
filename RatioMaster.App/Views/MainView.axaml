@@ -46,7 +46,7 @@
                             Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).SelectTabCommand}"
                             CommandParameter="{Binding}">
                       <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
-                        <!-- Dot = this tab's state: grey idle, green running, yellow warning, RED error —
+                        <!-- Dot = this tab's state: grey idle, blue running, green finished, yellow warning, red error —
                              so a tab in trouble is visible from the strip even when it isn't selected. -->
                         <Ellipse Width="7" Height="7" VerticalAlignment="Center"
                                  Fill="{Binding DotState, Converter={x:Static views:BoolBrushConverters.TabDot}}"/>

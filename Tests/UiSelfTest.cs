@@ -227,16 +227,59 @@ internal static class UiSelfTest
             Check(!main.FindControl<Button>("BackgroundCloseButton")!.IsVisible, "no background button without a tray");
             main.CancelCloseDialog();
             RatioTabViewModel resume = new("Resume test");
+            bool previousActivity = SessionActivity.IsActive;
+            resume.IsPreparing = true;
+            Check(!resume.InputsEnabled && !resume.StartCommand.CanExecute(null) && SessionActivity.IsActive == previousActivity,
+                "permission preparation locks session inputs without starting background session activity");
+            resume.IsPreparing = false;
             var metadata = TorrentFormatSelfTest.V2Fixture();
             resume.ApplyState(new TabState { TorrentHash = Convert.ToHexString(metadata.InfoHash), Uploaded = 12345, Downloaded = 3 });
             resume.LoadTorrentMetadataFromBytes(TorrentFormatSelfTest.V2FixtureBytes());
             Check(resume.CaptureState().Uploaded == 12345, "same torrent retains persisted counters");
+            resume.HasFinished = true;
+            resume.SeedersText = "Seeders: 5";
+            resume.LeechersText = "Leechers: 3";
+            resume.TotalTimeText = "12:34";
+            resume.TimerText = "01:23";
+            resume.NextUpdateCountdown = "00:01:23";
             resume.LoadTorrentMetadataFromBytes([1, 2, 3]);
+            Check(!resume.HasFinished && resume.HashHex.Length == 0 && resume.AlertLevel == TabAlertLevel.Error
+                && resume.StatusText.StartsWith("Failed to load torrent:", StringComparison.Ordinal),
+                "invalid torrent selection clears successful completion and reports its current failure");
+            Check(resume.SeedersText == "Seeders: -" && resume.LeechersText == "Leechers: -"
+                && resume.TotalTimeText == "00:00" && resume.TimerText == "idle" && resume.NextUpdateCountdown == "00:00:00",
+                "clearing torrent counters also clears the previous torrent's swarm and timing statistics");
             resume.LoadTorrentMetadataFromBytes(TorrentFormatSelfTest.V2FixtureBytes());
             Check(resume.CaptureState().Uploaded == 0, "invalid file clears unrelated resume counters");
+            Check(resume.AlertLevel == TabAlertLevel.None && resume.AlertMessage.Length == 0,
+                "a valid torrent selection clears the preceding load failure");
+            MainWindowViewModel limited = new(usePersistence: false);
+            for (int index = 1; index <= SessionRepository.MaxTabs; index++) limited.AddTabCommand.Execute(null);
+            Check(limited.Tabs.Count == SessionRepository.MaxTabs && !limited.AddTabCommand.CanExecute(null),
+                "adding tabs respects the storage limit before a session becomes unsaveable");
+            Task closeLimited = limited.CloseTabCommand.ExecuteAsync(limited.SelectedTab);
+            Check(closeLimited.IsCompletedSuccessfully && limited.AddTabCommand.CanExecute(null),
+                "closing a tab below the storage limit enables adding tabs again");
+            foreach (RatioTabViewModel limitedTab in limited.Tabs) limitedTab.ReleaseResources();
+            string reselectPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ratiomaster-reselect-" + Guid.NewGuid().ToString("N") + ".torrent");
+            try
+            {
+                System.IO.File.WriteAllBytes(reselectPath, TorrentFormatSelfTest.V2FixtureBytes());
+                resume.SetTorrentPath(reselectPath);
+                System.IO.File.WriteAllBytes(reselectPath, [1, 2, 3]);
+                resume.SetTorrentPath(reselectPath);
+                Check(resume.HashHex.Length == 0 && resume.AlertLevel == TabAlertLevel.Error,
+                    "reselecting the same path reloads its current bytes instead of retaining stale metadata");
+            }
+            finally { System.IO.File.Delete(reselectPath); }
             resume.ApplyState(new TabState { TorrentHash = new string('F', 40), Uploaded = 99, Downloaded = 3 });
             resume.LoadTorrentMetadataFromBytes(TorrentFormatSelfTest.V2FixtureBytes());
             Check(resume.CaptureState().Uploaded == 0, "different torrent cannot reuse saved counters");
+            resume.ReleaseResources();
+            resume.SetTorrentPath("closed-tab.torrent");
+            Check(!resume.InputsEnabled && !resume.StartCommand.CanExecute(null) && resume.CaptureState().TorrentSourcePath.Length == 0
+                && resume.TorrentFilePath != "closed-tab.torrent",
+                "a released tab rejects a delayed file-picker result and cannot restart");
             SessionData settings = new() { CloseBehavior = CloseBehavior.Background };
             RatioTabViewModel identity = new("Identity");
             identity.ApplyState(new TabState { Family = "uTorrent", Version = "3.5.5",
@@ -309,7 +352,7 @@ internal static class UiSelfTest
                 Button back = main.FindControl<Button>("ChangelogBackButton")!;
                 Point backBottom = back.TranslatePoint(new Point(0, back.Bounds.Height), main)!.Value;
                 Check(backBottom.Y <= main.Bounds.Height && all.ChangelogReleases.Count > 1
-                    && all.ChangelogReleases[0].Version == "2.1.0", "changelog has the current release and a visible touch-sized Back button");
+                    && all.ChangelogReleases[0].Version == AppInfo.Version, "changelog has the current release and a visible touch-sized Back button");
             }
             Check(main.TryDismissDialog() && all.AboutOpen && !all.ChangelogOpen, "Back from changelog returns to the information panel");
             Check(main.TryDismissDialog() && !all.HasInfoOverlay, "the information panel can then be dismissed");
@@ -344,7 +387,7 @@ internal static class UiSelfTest
                     window.Width = width; window.Height = height; Pump(window);
                     using Avalonia.Media.Imaging.RenderTargetBitmap frame = new(new PixelSize((int)width, (int)height), new Vector(96, 96));
                     frame.Render(window);
-                    frame.Save(System.IO.Path.Combine(imageDirectory, name + ".png"));
+                    frame.Save(System.IO.Path.Combine(imageDirectory, name + ".png"), Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
                 }
                 all.ShowChangelogCommand.Execute(null);
                 foreach ((double width, double height, string name) in new[] { (1000.0, 668.0, "changelog-wide"), (360.0, 740.0, "changelog-phone") })
@@ -352,7 +395,7 @@ internal static class UiSelfTest
                     window.Width = width; window.Height = height; Pump(window);
                     using Avalonia.Media.Imaging.RenderTargetBitmap frame = new(new PixelSize((int)width, (int)height), new Vector(96, 96));
                     frame.Render(window);
-                    frame.Save(System.IO.Path.Combine(imageDirectory, name + ".png"));
+                    frame.Save(System.IO.Path.Combine(imageDirectory, name + ".png"), Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
                 }
             }
             Console.WriteLine($"{count} UI checks passed.");

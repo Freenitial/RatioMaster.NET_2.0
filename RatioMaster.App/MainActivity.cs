@@ -2,6 +2,7 @@
 #if ANDROID
 using System;
 using System.Runtime.Versioning;
+using System.Threading.Tasks;
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
@@ -41,12 +42,17 @@ public class MainApplication : AvaloniaAndroidApplication<App>
     MainLauncher = true,
     EnableOnBackInvokedCallback = true,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode)]
-public class MainActivity : AvaloniaMainActivity
+public class MainActivity : AvaloniaMainActivity, ILocalNetworkPermission
 {
     private const int NotificationPermissionRequestCode = 1;
     private const string PermissionPreferences = "ratiomaster.permissions";
     private const string NotificationPermissionAsked = "post_notifications_asked";
+    private const int LocalNetworkPermissionRequestCode = 2;
+    private const string LocalNetworkPermission = "android.permission.ACCESS_LOCAL_NETWORK";
+    private const string LocalNetworkPermissionAsked = "local_network_asked";
     private BackInvokedCallback? backCallback;
+    private TaskCompletionSource<LocalNetworkPermissionResult>? localNetworkRequest;
+    private bool resumed;
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
@@ -58,12 +64,14 @@ public class MainActivity : AvaloniaMainActivity
         }
 
         ForegroundSessionBridge.Attach(this);
+        SessionNetworkAccess.Provider = this;
         RequestNotificationPermissionOnce();
     }
 
     protected override void OnResume()
     {
         base.OnResume();
+        resumed = true;
 
         if (OperatingSystem.IsAndroidVersionAtLeast(33) && backCallback is null)
         {
@@ -137,6 +145,38 @@ public class MainActivity : AvaloniaMainActivity
             // A denial or an empty cancellation result must not trigger another automatic request.
             MarkNotificationPermissionAsked();
         }
+        if (requestCode == LocalNetworkPermissionRequestCode && localNetworkRequest is { } request)
+        {
+            localNetworkRequest = null;
+            request.TrySetResult(grantResults.Length == 0 ? LocalNetworkPermissionResult.Cancelled
+                : CheckSelfPermission(LocalNetworkPermission) == Permission.Granted
+                    ? LocalNetworkPermissionResult.Granted : LocalNetworkPermissionResult.Denied);
+        }
+    }
+
+    bool ILocalNetworkPermission.IsGranted => !OperatingSystem.IsAndroidVersionAtLeast(37)
+        || CheckSelfPermission(LocalNetworkPermission) == Permission.Granted;
+
+    Task<LocalNetworkPermissionResult> ILocalNetworkPermission.RequestAsync()
+    {
+        if (((ILocalNetworkPermission)this).IsGranted) return Task.FromResult(LocalNetworkPermissionResult.Granted);
+        if (localNetworkRequest is { } pending) return pending.Task;
+        if (!resumed || IsFinishing || IsDestroyed) return Task.FromResult(LocalNetworkPermissionResult.Cancelled);
+        using ISharedPreferences preferences = GetSharedPreferences(PermissionPreferences, FileCreationMode.Private)!;
+        if (preferences.GetBoolean(LocalNetworkPermissionAsked, false)) return Task.FromResult(LocalNetworkPermissionResult.Denied);
+        using ISharedPreferencesEditor editor = preferences.Edit()!;
+        editor.PutBoolean(LocalNetworkPermissionAsked, true);
+        editor.Apply();
+        TaskCompletionSource<LocalNetworkPermissionResult> request = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        localNetworkRequest = request;
+        try { RequestPermissions([LocalNetworkPermission], LocalNetworkPermissionRequestCode); }
+        catch (Exception exception)
+        {
+            localNetworkRequest = null;
+            Android.Util.Log.Warn("RatioMaster", "Unable to request local network permission: " + exception.Message);
+            request.TrySetResult(LocalNetworkPermissionResult.Cancelled);
+        }
+        return request.Task;
     }
 
     private void MarkNotificationPermissionAsked()
@@ -150,6 +190,7 @@ public class MainActivity : AvaloniaMainActivity
     // Single-view hosts have no closing event; persist when the activity loses the foreground.
     protected override void OnPause()
     {
+        resumed = false;
         UnregisterBackCallback();
         base.OnPause();
         try
@@ -164,6 +205,9 @@ public class MainActivity : AvaloniaMainActivity
 
     protected override void OnDestroy()
     {
+        if (ReferenceEquals(SessionNetworkAccess.Provider, this)) SessionNetworkAccess.Provider = null;
+        localNetworkRequest?.TrySetResult(LocalNetworkPermissionResult.Cancelled);
+        localNetworkRequest = null;
         UnregisterBackCallback();
         base.OnDestroy();
     }
