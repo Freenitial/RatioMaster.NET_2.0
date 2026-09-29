@@ -20,6 +20,8 @@ $mutexOwned = $false
 $validationLock = $null
 $lockOwned = $false
 $scratchPath = $null
+$scratchRoot = $null
+$scratchName = $null
 $locationPushed = $false
 $exitStatus = 1
 $savedEnvironment = @{}
@@ -122,7 +124,14 @@ try {
     $script:ValidationLogDirectory = Join-Path $logRoot ('validation/' + $DesktopRid)
     [IO.Directory]::CreateDirectory($script:ValidationLogDirectory) | Out-Null
     [IO.File]::WriteAllText((Join-Path $script:ValidationLogDirectory 'dotnet-info.log'), $information, (New-Object Text.UTF8Encoding($false)))
-    $scratchPath = [IO.Path]::GetFullPath((Join-Path $script:ValidationLogDirectory ('work-' + [Guid]::NewGuid().ToString('N'))))
+    $scratchRoot = $script:ValidationLogDirectory
+    $scratchName = 'work-' + [Guid]::NewGuid().ToString('N')
+    if (-not $runningOnWindows) {
+        # Unix named pipes use sockets with strict path-length limits.
+        $scratchRoot = '/tmp'
+        $scratchName = 'rm-' + [Guid]::NewGuid().ToString('N').Substring(0, 16)
+    }
+    $scratchPath = [IO.Path]::GetFullPath((Join-Path $scratchRoot $scratchName))
     [IO.Directory]::CreateDirectory($scratchPath) | Out-Null
     foreach ($name in @('TEMP', 'TMP', 'TMPDIR')) {
         [Environment]::SetEnvironmentVariable($name, $scratchPath, 'Process')
@@ -151,8 +160,13 @@ finally {
     if ($scratchPath -and [IO.Directory]::Exists($scratchPath)) {
         try {
             $resolvedScratch = [IO.Path]::GetFullPath($scratchPath)
-            $allowedPrefix = [IO.Path]::GetFullPath($script:ValidationLogDirectory) + [IO.Path]::DirectorySeparatorChar
-            if (-not $resolvedScratch.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $resolvedRoot = [IO.Path]::GetFullPath($scratchRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+            $comparison = [StringComparison]::Ordinal
+            if ($runningOnWindows) {
+                $comparison = [StringComparison]::OrdinalIgnoreCase
+            }
+            if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedScratch), $resolvedRoot, $comparison) -or
+                -not [string]::Equals([IO.Path]::GetFileName($resolvedScratch), $scratchName, [StringComparison]::Ordinal)) {
                 throw 'Refusing to remove an unexpected validation scratch directory.'
             }
             Remove-Item -LiteralPath $resolvedScratch -Recurse -Force -ErrorAction Stop

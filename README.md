@@ -156,7 +156,7 @@ bash Installer/Scripts/package_linux.sh linux-x64
 bash Installer/Scripts/package_linux.sh linux-arm64
 ```
 
-Use a prepared Ubuntu 22.04 environment with clang, zlib development files, binutils, curl, desktop-file-utils and the selected .NET SDK. ARM64 cross-compilation from x64 also requires its cross compiler and development libraries. The Windows builder selects `Ubuntu-22.04`, or the distribution named by `RM_WSL_DISTRO`. Missing prerequisites produce an explicitly labelled self-contained JIT archive; a compilation or ABI failure stops packaging. Headless AppImage packaging requires the verified tools to be cached; the direct Linux script can download them.
+Use a prepared Ubuntu 22.04 environment with clang, zlib development files, binutils, curl, file, desktop-file-utils and the selected .NET SDK. ARM64 cross-compilation from x64 also requires its cross compiler and development libraries. The Windows builder selects `Ubuntu-22.04`, or the distribution named by `RM_WSL_DISTRO`. Missing prerequisites produce an explicitly labelled self-contained JIT archive; a compilation or ABI failure stops packaging. Headless AppImage packaging requires the verified tools to be cached; the direct Linux script can download them.
 
 On macOS, with Xcode command-line tools:
 

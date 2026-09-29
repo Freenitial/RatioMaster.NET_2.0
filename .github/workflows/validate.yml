@@ -84,7 +84,7 @@ jobs:
       - name: Install Ubuntu 22.04 native prerequisites
         run: |
           apt-get update
-          apt-get install --yes ca-certificates curl git clang zlib1g-dev libicu70 libfontconfig1 libfreetype6 libx11-6 libice6 libsm6 desktop-file-utils python3 xvfb x11-utils
+          apt-get install --yes ca-certificates curl file git clang zlib1g-dev libicu70 libfontconfig1 libfreetype6 libx11-6 libice6 libsm6 desktop-file-utils python3 xvfb x11-utils
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

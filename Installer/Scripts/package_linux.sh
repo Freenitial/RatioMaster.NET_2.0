@@ -23,7 +23,7 @@ esac
 [ -r /etc/os-release ] || missing 'Linux native packaging requires Ubuntu 22.04.'
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 22.04 ] || missing 'Linux native packaging requires Ubuntu 22.04 (glibc 2.35). Use that distribution or the self-contained archive fallback.'
-for tool in clang readelf tar curl sha256sum desktop-file-validate flock; do
+for tool in clang readelf tar curl file sha256sum desktop-file-validate flock; do
     command -v "$tool" >/dev/null 2>&1 || missing "Missing Linux packaging prerequisite: $tool"
 done
 [ -f /usr/include/zlib.h ] || missing 'Install zlib1g-dev before native packaging.'
