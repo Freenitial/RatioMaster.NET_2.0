@@ -49,15 +49,35 @@ internal sealed class PeerListenerHub
     internal static PeerListenerHub Shared { get; } = new();
 
     /// <summary>
-    /// Dual-stack, and exclusive except on Linux: on Windows and macOS a dual-mode bind with address reuse succeeds
-    /// even when another application holds the IPv4 port, which would leave IPv4 peers to that application. Linux
-    /// refuses that bind anyway, and .NET's default address reuse there lets a restarted session bind again past
-    /// the TIME_WAIT of connections it closed (elsewhere the bind retry covers that short wait).
+    /// Binds the dual-stack listening socket of a port, once no other application holds that port on IPv4. A dual-stack
+    /// bind beside another application's IPv4 listener succeeds on macOS (where .NET enables address reuse at every
+    /// TCP bind, whatever the exclusive option) and, without exclusive use, on Windows: that application would then
+    /// receive the IPv4 peers. A bind to the very same IPv4 address is refused on every system, so it is tried first.
+    /// Exclusive use on Windows also keeps other programs from sharing the socket; elsewhere .NET's address reuse
+    /// lets a restarted session bind again past the TIME_WAIT of connections it closed.
     /// </summary>
-    internal static void ConfigureListenSocket(Socket socket)
+    internal static Socket BindListenSocket(int port)
     {
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsAndroid()) socket.ExclusiveAddressUse = true;
-        if (socket.AddressFamily == AddressFamily.InterNetworkV6) socket.DualMode = true;
+        bool dualStack = Socket.OSSupportsIPv6 && Socket.OSSupportsIPv4;
+        if (dualStack)
+        {
+            using Socket ipv4 = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            if (OperatingSystem.IsWindows()) ipv4.ExclusiveAddressUse = true;
+            ipv4.Bind(new IPEndPoint(IPAddress.Any, port));
+        }
+        Socket socket = new(dualStack ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            if (OperatingSystem.IsWindows()) socket.ExclusiveAddressUse = true;
+            if (dualStack) socket.DualMode = true;
+            socket.Bind(new IPEndPoint(dualStack ? IPAddress.IPv6Any : IPAddress.Any, port));
+            return socket;
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
     }
 
     internal Registration Register(int port, PeerTorrent torrent, Action<ListenerState, string> onState)
@@ -157,7 +177,7 @@ internal sealed class PeerListenerHub
         private readonly object gate = new();
         private readonly List<Registration> registrations = [];
         private CancellationTokenSource? running;
-        private TcpListener? socket;
+        private Socket? socket;
         private Timer? retry;
         private string failure = string.Empty;
         private bool stopped;
@@ -249,19 +269,18 @@ internal sealed class PeerListenerHub
                 if (stopped || socket is not null) return;
                 try
                 {
-                    TcpListener candidate = new(Socket.OSSupportsIPv6 ? IPAddress.IPv6Any : IPAddress.Any, port);
-                    ConfigureListenSocket(candidate.Server);
+                    Socket candidate = BindListenSocket(port);
                     CancellationTokenSource accepting = new();
                     try
                     {
-                        candidate.Start(32);
-                        candidate.Server.Blocking = false;
+                        candidate.Listen(32);
+                        candidate.Blocking = false;
                         new Thread(() => AcceptLoop(candidate, accepting.Token)) { IsBackground = true, Name = "Peer listener " + port }.Start();
                     }
                     catch
                     {
                         accepting.Dispose();
-                        candidate.Stop();
+                        candidate.Dispose();
                         throw;
                     }
                     socket = candidate;
@@ -290,14 +309,14 @@ internal sealed class PeerListenerHub
         }, null, BindRetry, BindRetry);
 
         /// <summary>The listening socket failed for good: report it and bind again later.</summary>
-        private void Lost(TcpListener server, string message)
+        private void Lost(Socket server, string message)
         {
             Registration[] notify;
             lock (gate)
             {
                 if (stopped || socket != server) return;
                 socket = null;
-                server.Stop();
+                server.Dispose();
                 running?.Cancel();
                 running?.Dispose();
                 running = null;
@@ -318,7 +337,7 @@ internal sealed class PeerListenerHub
                 running?.Cancel();
                 running?.Dispose();
                 running = null;
-                socket?.Stop();
+                socket?.Dispose();
                 socket = null;
             }
         }
@@ -329,16 +348,15 @@ internal sealed class PeerListenerHub
         /// on a thread-pool thread, which ends the process. Here that error reaches this loop and is skipped like a
         /// reset. The listening socket is non-blocking and polled, so stopping never waits for another peer.
         /// </summary>
-        private void AcceptLoop(TcpListener server, CancellationToken ct)
+        private void AcceptLoop(Socket server, CancellationToken ct)
         {
-            Socket listening = server.Server;
             while (!ct.IsCancellationRequested)
             {
                 Socket client;
                 try
                 {
-                    if (!listening.Poll(AcceptPoll, SelectMode.SelectRead)) continue;
-                    client = listening.Accept();
+                    if (!server.Poll(AcceptPoll, SelectMode.SelectRead)) continue;
+                    client = server.Accept();
                 }
                 catch (Exception) when (ct.IsCancellationRequested) { return; }
 

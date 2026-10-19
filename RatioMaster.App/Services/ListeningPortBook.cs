@@ -106,9 +106,7 @@ internal static class ListeningPortBook
         if (PeerListenerHub.Shared.Serves(port)) return true;
         try
         {
-            using Socket probe = new(Socket.OSSupportsIPv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            PeerListenerHub.ConfigureListenSocket(probe);
-            probe.Bind(new IPEndPoint(Socket.OSSupportsIPv6 ? IPAddress.IPv6Any : IPAddress.Any, port));
+            using Socket probe = PeerListenerHub.BindListenSocket(port);
             return true;
         }
         catch (SocketException) { return false; }
