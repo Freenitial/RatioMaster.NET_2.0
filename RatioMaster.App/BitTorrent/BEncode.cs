@@ -6,6 +6,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using RatioMaster.Localization;
 
 /// <summary>A bencoded value (dictionary, list, string or integer).</summary>
 internal interface IBEncodeValue
@@ -103,18 +104,18 @@ internal sealed class ValueString : IBEncodeValue
 
     public void Parse(Stream s, byte firstByte)
     {
-        if (firstByte < (byte)'0' || firstByte > (byte)'9') throw new TorrentException("Invalid string length.");
+        if (firstByte < (byte)'0' || firstByte > (byte)'9') throw new TorrentException(Strings.BencodeInvalidStringLength);
         int length = firstByte - '0';
         byte current;
         while ((current = BEncode.ReadByteChecked(s)) != (byte)':')
         {
             if (firstByte == (byte)'0' || current < (byte)'0' || current > (byte)'9'
                 || length > (BEncode.MaxStringBytes - (current - '0')) / 10)
-                throw new TorrentException("Invalid or excessive string length.");
+                throw new TorrentException(Strings.BencodeInvalidExcessiveStringLength);
             length = checked(length * 10 + current - '0');
         }
         if (length > BEncode.MaxStringBytes || (s.CanSeek && length > s.Length - s.Position))
-            throw new TorrentException("Truncated or excessive bencoded string.");
+            throw new TorrentException(Strings.BencodeTruncatedExcessiveBencodedString);
         data = new byte[length];
         ReadExact(s, data, length);
         v = Enc.GetString(data);
@@ -126,7 +127,7 @@ internal sealed class ValueString : IBEncodeValue
         while (read < length)
         {
             int n = s.Read(buffer, read, length - read);
-            if (n <= 0) throw new IncompleteTorrentData("Truncated bencoded string.");
+            if (n <= 0) throw new IncompleteTorrentData(Strings.TorrentTruncatedBencodedString);
 
             read += n;
         }
@@ -178,7 +179,7 @@ internal sealed class ValueNumber : IBEncodeValue
         while (current != 'e')
         {
             if (buffer.Length >= 20 || (current != '-' && (current < '0' || current > '9')))
-                throw new TorrentException("Invalid bencoded integer.");
+                throw new TorrentException(Strings.BencodeInvalidBencodedInteger);
             buffer += current.ToString();
             current = (char)BEncode.ReadByteChecked(s);
         }
@@ -188,7 +189,7 @@ internal sealed class ValueNumber : IBEncodeValue
         if (negative) digits = digits[1..];
         if (digits.Length == 0 || (digits[0] == '0' && (digits.Length != 1 || negative))
             || !long.TryParse(buffer, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long number))
-            throw new TorrentException("Invalid or excessive bencoded integer.");
+            throw new TorrentException(Strings.BencodeInvalidExcessiveBencodedInteger);
         Integer = number;
     }
 }
@@ -206,7 +207,7 @@ internal static class BEncode
         int b = s.ReadByte();
         if (b < 0)
         {
-            throw new IncompleteTorrentData("Unexpected end of bencoded data (truncated).");
+            throw new IncompleteTorrentData(Strings.BencodeTruncated);
         }
 
         return (byte)b;
@@ -224,7 +225,7 @@ internal static class BEncode
     internal static IBEncodeValue Parse(Stream d, byte firstByte)
     {
         if (nesting == 0) nodes = 0;
-        if (++nesting > 64) { nesting--; throw new TorrentException("Bencoded data is nested too deeply."); }
+        if (++nesting > 64) { nesting--; throw new TorrentException(Strings.BencodeDataNestedTooDeeply); }
         try
         {
             CountNode();
@@ -253,6 +254,6 @@ internal static class BEncode
 
     internal static void CountNode()
     {
-        if (++nodes > MaxNodes) throw new TorrentException("Bencoded data exceeds the node limit.");
+        if (++nodes > MaxNodes) throw new TorrentException(Strings.BencodeDataExceedsNodeLimit);
     }
 }

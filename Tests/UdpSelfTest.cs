@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using RatioMaster.BitTorrent;
 using RatioMaster.Engine;
+using RatioMaster.Services;
 using RatioMaster.Models;
 
 /// <summary>Loopback-only UDP transport checks. Run with await UdpSelfTest.RunAsync().</summary>
@@ -119,6 +120,7 @@ internal static class UdpSelfTest
         public bool RandomDownloadEnabled => false;
         public string StopWhen => "Never";
         public string StopValue => "";
+        public StopConditionSettings StopCondition => new(RatioMaster.Engine.StopCondition.Never, StopValue);
         internal string Error = "";
         public void ApplyAlert(EngineAlert level, string message) { if (level == EngineAlert.Error) Error = message; }
     }
@@ -226,7 +228,7 @@ internal static class UdpSelfTest
                         : new UdpTrackerClient().AnnounceAsync(uri, Request(), ct);
                     Task assertion = error
                         ? ExpectAsync<IOException>(() => operation, ex => ex.Message.Contains("passkey rejected:")
-                            && ex.Message.Contains("truncated") && ex.Message.Length < 1100)
+                            && ex.Message.EndsWith('…') && ex.Message.Length < 1100)
                         : ExpectAsync<InvalidDataException>(() => operation, ex => ex.Message.Contains("truncated"));
                     await Task.WhenAll(ServeAsync(), assertion).ConfigureAwait(false);
                 }).ConfigureAwait(false);

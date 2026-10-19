@@ -2,6 +2,7 @@ namespace RatioMaster.Models;
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -16,6 +17,9 @@ internal static class ClientCatalogLoader
         "family", "version", "base", "httpProtocol", "headers", "query", "peerIdPrefixHex", "peerIdLiteralPrefix",
         "peerIdTail", "peerIdByteMinimum", "peerIdByteMaximum", "urlEncoding", "hashUpperCase",
         "peerIdUpperCase", "keyLength", "keyUpperCase", "keyRefreshSeconds", "numWant", "supportsV2",
+        "intervalFloorSeconds", "defaultMinIntervalSeconds",
+        "unreserved", "portRanges", "globalAddresses", "handshakeReservedHex", "extensionStyle",
+        "extensionClient", "extensionRequestQueue", "encryptionPrefersRc4", "keepAliveSeconds",
     ];
     private static readonly string[] Tokens =
     [
@@ -61,6 +65,13 @@ internal static class ClientCatalogLoader
                 try { prefix = Encoding.Latin1.GetString(Convert.FromHexString(prefixHex)); }
                 catch (FormatException) { throw Invalid("peerIdPrefixHex must contain complete hexadecimal bytes."); }
             }
+            string? encodingName = OptionalString(entry, "urlEncoding");
+            string? unreserved = OptionalString(entry, "unreserved");
+            if (encodingName is not null && unreserved is not null) throw Invalid("Use either urlEncoding or unreserved, not both.");
+            string? ports = OptionalString(entry, "portRanges");
+            IReadOnlyList<PortRange> portRanges = template.PortRanges;
+            if (ports is not null && !PortRange.TryParse(ports, out portRanges))
+                throw Invalid("portRanges must list 1 to 16 ports or ranges such as 10000-64999 within 1 through 65535.");
             ClientProfileDefinition profile = template with
             {
                 Family = family, Version = version, PeerIdPrefix = prefix,
@@ -71,15 +82,24 @@ internal static class ClientCatalogLoader
                 PeerIdTail = ParseTail(OptionalString(entry, "peerIdTail"), template.PeerIdTail),
                 PeerIdByteMinimum = Integer(entry, "peerIdByteMinimum", template.PeerIdByteMinimum),
                 PeerIdByteMaximum = Integer(entry, "peerIdByteMaximum", template.PeerIdByteMaximum),
-                UrlEncoding = ParseEncoding(OptionalString(entry, "urlEncoding"), template.UrlEncoding),
+                Unreserved = unreserved ?? (encodingName is null ? template.Unreserved : ClientEncoding.UnreservedFor(ParseEncoding(encodingName))),
                 HashUpperCase = Boolean(entry, "hashUpperCase", template.HashUpperCase),
                 PeerIdUpperCase = Boolean(entry, "peerIdUpperCase", template.PeerIdUpperCase),
                 KeyLength = Integer(entry, "keyLength", template.KeyLength),
                 KeyUpperCase = Boolean(entry, "keyUpperCase", template.KeyUpperCase),
                 KeyRefreshSeconds = Integer(entry, "keyRefreshSeconds", template.KeyRefreshSeconds),
+                IntervalFloorSeconds = Integer(entry, "intervalFloorSeconds", template.IntervalFloorSeconds),
+                DefaultMinIntervalSeconds = Integer(entry, "defaultMinIntervalSeconds", template.DefaultMinIntervalSeconds),
                 NumWant = Integer(entry, "numWant", template.NumWant),
                 SupportsV2 = Boolean(entry, "supportsV2", template.SupportsV2),
+                GlobalAddresses = ParseGlobalAddresses(OptionalString(entry, "globalAddresses"), template.GlobalAddresses),
+                PortRanges = portRanges,
+                PeerWire = ReadPeerWire(entry, template.PeerWire),
             };
+
+            // The v2 upgrade offer belongs to v2-capable constructions only.
+            if (profile.PeerWire.HybridUpgradeBit && !profile.SupportsV2)
+                profile = profile with { PeerWire = profile.PeerWire with { HybridUpgradeBit = false } };
             Validate(profile);
             int position = result.FindIndex(existing => existing.Name == profile.Name);
             if (position < 0) result.Add(profile);
@@ -96,6 +116,19 @@ internal static class ClientCatalogLoader
         if (profile.PeerIdPrefix.Length is < 1 or > 20) throw Invalid("The peer ID prefix must contain 1 to 20 bytes.");
         if (profile.PeerIdTail == PeerIdTailKind.Transmission && profile.PeerIdPrefix.Length != 8)
             throw Invalid("The Transmission checksum generator requires an 8-byte prefix.");
+        if (profile.PeerIdTail == PeerIdTailKind.UTorrent && profile.PeerIdPrefix.Length > 18)
+            throw Invalid("The utorrent tail needs two bytes after the prefix for its check bytes.");
+        if (profile.Unreserved.Any(value => !ClientEncoding.AllowedUnreserved.Contains(value))
+            || profile.Unreserved.Distinct().Count() != profile.Unreserved.Length)
+            throw Invalid("unreserved may only list distinct characters from " + ClientEncoding.AllowedUnreserved + ".");
+        PeerWireDefinition wire = profile.PeerWire;
+        if (wire.Reserved.Length != 8) throw Invalid("handshakeReservedHex must contain 16 hexadecimal digits.");
+        if ((wire.Style != ExtensionHandshakeStyle.None) != wire.SupportsExtensions)
+            throw Invalid("extensionStyle and the extension bit (byte 5, 0x10) of handshakeReservedHex must agree.");
+        if (wire.ClientName.Length > 64 || wire.ClientName.Any(char.IsControl))
+            throw Invalid("extensionClient must contain at most 64 printable characters.");
+        if (wire.RequestQueue is < 1 or > 10000) throw Invalid("extensionRequestQueue must be between 1 and 10000.");
+        if (wire.KeepAliveSeconds is < 30 or > 300) throw Invalid("keepAliveSeconds must be between 30 and 300.");
         if (profile.PeerIdByteMinimum is < 0 or > 255 || profile.PeerIdByteMaximum < profile.PeerIdByteMinimum
             || profile.PeerIdByteMaximum > 255) throw Invalid("The peer ID byte range must lie inside 0 through 255.");
         if (!profile.PeerIdPrefix.StartsWith(profile.PeerIdLiteralPrefix, StringComparison.Ordinal)
@@ -104,6 +137,8 @@ internal static class ClientCatalogLoader
         if (profile.KeyLength is < 1 or > 8) throw Invalid("keyLength must be between 1 and 8 hexadecimal digits.");
         if (profile.KeyRefreshSeconds != 0 && (profile.KeyRefreshSeconds is < 60 or > 86400))
             throw Invalid("keyRefreshSeconds must be 0 or between 60 and 86400.");
+        if (profile.IntervalFloorSeconds is < 0 or > 3600) throw Invalid("intervalFloorSeconds must be between 0 and 3600.");
+        if (profile.DefaultMinIntervalSeconds is < 0 or > 3600) throw Invalid("defaultMinIntervalSeconds must be between 0 and 3600.");
         if (profile.NumWant is < 0 or > 200) throw Invalid("numWant must be between 0 and 200.");
         ValidateHeaders(profile.Headers);
         ValidateQuery(profile.Query);
@@ -262,17 +297,55 @@ internal static class ClientCatalogLoader
         "libtorrent" => PeerIdTailKind.Libtorrent,
         "binary" => PeerIdTailKind.Binary,
         "transmission" => PeerIdTailKind.Transmission,
+        "utorrent" => PeerIdTailKind.UTorrent,
         _ => throw Invalid("Unknown peerIdTail: " + name),
     };
 
-    private static ClientUrlEncoding ParseEncoding(string? name, ClientUrlEncoding fallback) => name switch
+    private static ClientUrlEncoding ParseEncoding(string name) => name switch
     {
-        null => fallback,
         "libtorrent" => ClientUrlEncoding.Libtorrent,
         "rfc3986" => ClientUrlEncoding.Rfc3986,
         "alphanumeric" => ClientUrlEncoding.Alphanumeric,
         _ => throw Invalid("Unknown urlEncoding: " + name),
     };
+
+    private static GlobalAddressMode ParseGlobalAddresses(string? name, GlobalAddressMode fallback) => name switch
+    {
+        null => fallback,
+        "none" => GlobalAddressMode.None,
+        "private" => GlobalAddressMode.PrivateTorrents,
+        "always" => GlobalAddressMode.Always,
+        _ => throw Invalid("Unknown globalAddresses: " + name),
+    };
+
+    private static PeerWireDefinition ReadPeerWire(JsonElement entry, PeerWireDefinition template)
+    {
+        ImmutableArray<byte> reserved = template.Reserved;
+        if (OptionalString(entry, "handshakeReservedHex") is { } hex)
+        {
+            if (hex.Length != 16) throw Invalid("handshakeReservedHex must contain 16 hexadecimal digits.");
+            try { reserved = ImmutableArray.Create(Convert.FromHexString(hex)); }
+            catch (FormatException) { throw Invalid("handshakeReservedHex must contain 16 hexadecimal digits."); }
+        }
+        ExtensionHandshakeStyle style = OptionalString(entry, "extensionStyle") switch
+        {
+            null => template.Style,
+            "none" => ExtensionHandshakeStyle.None,
+            "libtorrent" => ExtensionHandshakeStyle.Libtorrent,
+            "transmission" => ExtensionHandshakeStyle.Transmission,
+            "utorrent" => ExtensionHandshakeStyle.UTorrent,
+            string other => throw Invalid("Unknown extensionStyle: " + other),
+        };
+        return template with
+        {
+            Reserved = reserved,
+            Style = style,
+            ClientName = OptionalString(entry, "extensionClient") ?? template.ClientName,
+            RequestQueue = Integer(entry, "extensionRequestQueue", template.RequestQueue),
+            PrefersRc4 = Boolean(entry, "encryptionPrefersRc4", template.PrefersRc4),
+            KeepAliveSeconds = Integer(entry, "keepAliveSeconds", template.KeepAliveSeconds),
+        };
+    }
 
     private static bool IsLabelByte(char value) => char.IsAsciiLetterOrDigit(value) || value is '-' or '_' or '.' or '~';
 

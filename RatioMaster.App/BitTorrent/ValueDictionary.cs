@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using RatioMaster.Localization;
 
 internal sealed class ValueDictionary : IBEncodeValue
 {
@@ -43,14 +44,14 @@ internal sealed class ValueDictionary : IBEncodeValue
         {
             if (b < (byte)'0' || b > (byte)'9')
             {
-                throw new TorrentException("Key expected to be a string.");
+                throw new TorrentException(Strings.BencodeKeyExpectedString);
             }
 
             ValueString keyString = new();
             BEncode.CountNode();
             keyString.Parse(s, b);
             if (dict.ContainsKey(keyString.String))
-                throw new TorrentException("Bencoded dictionary keys must be unique.");
+                throw new TorrentException(Strings.BencodeDictionaryKeysUnique);
             IBEncodeValue value = BEncode.Parse(s);
             dict.Add(keyString.String, value);
         }

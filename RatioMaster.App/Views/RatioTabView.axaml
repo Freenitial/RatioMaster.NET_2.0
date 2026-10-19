@@ -4,6 +4,7 @@
              xmlns:controls="using:RatioMaster.Controls"
              xmlns:behaviors="using:RatioMaster.Behaviors"
              xmlns:views="using:RatioMaster.Views"
+             xmlns:loc="using:RatioMaster.Localization"
              x:Class="RatioMaster.Views.RatioTabView"
              x:DataType="vm:RatioTabViewModel">
 
@@ -56,6 +57,13 @@
     <Style Selector="TextBox:disabled /template/ Border#PART_BorderElement">
       <Setter Property="Opacity" Value="0.5"/>
     </Style>
+    <!-- Translated labels and options can be longer than English: wrap instead of overflowing. -->
+    <Style Selector="CheckBox">
+      <Setter Property="MaxWidth" Value="420"/>
+    </Style>
+    <Style Selector="CheckBox /template/ ContentPresenter#ContentPresenter">
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
     <Style Selector="TextBox.terminal /template/ ScrollViewer#PART_ScrollViewer /template/ ScrollBar">
       <Setter Property="Theme" Value="{StaticResource TerminalScrollBar}"/>
     </Style>
@@ -95,18 +103,22 @@
       <!-- Torrent file -->
       <Border Classes="group">
         <StackPanel Spacing="5">
-          <TextBlock Classes="grouphead" Text="Torrent file"/>
-          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupTorrentFile}"/>
+          <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
             <Panel Grid.Column="0">
               <!-- Locked while a session runs: editing it would swap the tab's torrent state out from
                    under the engine, which keeps announcing the ORIGINAL info-hash. -->
-              <TextBox Text="{Binding TorrentFilePath}" IsEnabled="{Binding InputsEnabled}"
-                       PlaceholderText="Drag &amp; drop, paste a path, or Browse…"/>
+              <TextBox Text="{Binding TorrentFilePath}" IsEnabled="{Binding InputsEnabled}" FlowDirection="LeftToRight"
+                       PlaceholderText="{x:Static loc:Strings.TorrentPathPlaceholder}"
+                       AutomationProperties.Name="{x:Static loc:Strings.GroupTorrentFile}"/>
               <Border Classes="pulseoverlay" Classes.pulse="{Binding TorrentInputPulsing}"
                       BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="1.5"
                       CornerRadius="3" IsHitTestVisible="False"/>
             </Panel>
-            <Button Grid.Column="1" Content="Browse…" Click="OnBrowseClick" IsEnabled="{Binding InputsEnabled}" ToolTip.Tip="Choose a .torrent file."/>
+            <Button Grid.Column="1" Content="{x:Static loc:Strings.Browse}" Click="OnBrowseClick" IsEnabled="{Binding InputsEnabled}"
+                    ToolTip.Tip="{x:Static loc:Strings.BrowseTip}" AutomationProperties.Name="{x:Static loc:Strings.Browse}"/>
+            <Button Grid.Column="2" Content="{x:Static loc:Strings.AddFolder}" Classes="ghost" Click="OnAddFolderClick"
+                    ToolTip.Tip="{x:Static loc:Strings.AddFolderTip}" AutomationProperties.Name="{x:Static loc:Strings.AddFolder}"/>
           </Grid>
         </StackPanel>
       </Border>
@@ -114,26 +126,28 @@
       <!-- Torrent info -->
       <Border Classes="group">
         <StackPanel Spacing="4">
-          <TextBlock Classes="grouphead" Text="Torrent info"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupTorrentInfo}"/>
           <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="5" ColumnSpacing="6">
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Tracker"/>
-            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding Tracker}" IsReadOnly="{Binding !InputsEnabled}" ToolTip.Tip="Tracker URL used by this tab. Editable while stopped."/>
-            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Hash"/>
-            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding HashHex}" IsReadOnly="True" FontFamily="{DynamicResource MonoFontFamily}"/>
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelTracker}"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding Tracker}" IsReadOnly="{Binding !InputsEnabled}" FlowDirection="LeftToRight"
+                       ToolTip.Tip="{x:Static loc:Strings.TrackerTip}" AutomationProperties.Name="{x:Static loc:Strings.LabelTracker}"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelHash}"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding HashHex}" IsReadOnly="True" FontFamily="{DynamicResource MonoFontFamily}"
+                       FlowDirection="LeftToRight" AutomationProperties.Name="{x:Static loc:Strings.LabelHash}"/>
             <Border Name="SizeLabel" Grid.Row="2" Grid.Column="0" Classes="sizewarning"
                     Classes.active="{Binding SmallTorrentWarning}" CornerRadius="5" Padding="5,2"
                     VerticalAlignment="Center" Cursor="Hand" ToolTip.Tip="{Binding SizeTip}" Tapped="OnSizeTipTapped">
               <StackPanel Orientation="Horizontal" Spacing="4">
-                <TextBlock Classes="label" Text="Size"/>
+                <TextBlock Classes="label" Text="{x:Static loc:Strings.LabelSize}"/>
                 <TextBlock Text="⚠" IsVisible="{Binding SmallTorrentWarning}"/>
               </StackPanel>
             </Border>
             <Panel Grid.Row="2" Grid.Column="1">
-              <TextBox Name="SizeBox" Text="{Binding TorrentSize}" IsReadOnly="True"
+              <TextBox Name="SizeBox" Text="{Binding TorrentSize}" IsReadOnly="True" AutomationProperties.Name="{x:Static loc:Strings.LabelSize}"
                        ToolTip.Tip="{Binding SizeTip}" Tapped="OnSizeTipTapped" SizeChanged="OnSizeBoxSizeChanged"/>
-              <TextBlock Name="SizeHint" Text="10+ GiB is better!" IsVisible="False"
+              <TextBlock Name="SizeHint" Text="{x:Static loc:Strings.SizeHint}" IsVisible="False"
                          Foreground="{DynamicResource StateWarningBrush}" FontSize="11"
-                         HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0" IsHitTestVisible="False"/>
+                         HorizontalAlignment="Right" VerticalAlignment="Center" Margin="10,0,10,0" IsHitTestVisible="False"/>
               <Border Classes="pulseoverlay" Classes.pulse="{Binding SmallTorrentWarning}"
                       BorderBrush="{DynamicResource StateWarningBrush}" BorderThickness="1.5"
                       CornerRadius="4" IsHitTestVisible="False"/>
@@ -145,19 +159,21 @@
       <!-- Aligned columns for the speed and random controls. -->
       <Border Name="SpeedCard" Classes="group">
         <StackPanel Spacing="6">
-          <TextBlock Classes="grouphead" Text="Speed options"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupSpeed}"/>
           <!-- Left-aligned Auto columns: label / rate / checkbox line up vertically between the two rows,
                so the upload and download controls sit in the same three columns. -->
           <Grid ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="10"
                 HorizontalAlignment="Left">
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Upload MiB/s" VerticalAlignment="Center"/>
-            <TextBox   Grid.Row="0" Grid.Column="1" Classes="num" Text="{Binding UploadSpeed}" behaviors:FieldValidation.Rule="Double"/>
-            <CheckBox  Grid.Row="0" Grid.Column="2" Content="Random" IsChecked="{Binding RandomUpload}" VerticalAlignment="Center"
-                       ToolTip.Tip="Vary the upload rate along a smooth, gradually drifting curve (about ×0.55 to ×1.15 of the value on the left) instead of a perfectly flat line. Unchecked = an exact, constant rate."/>
-            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Download MiB/s" VerticalAlignment="Center"/>
-            <TextBox   Grid.Row="1" Grid.Column="1" Classes="num" Text="{Binding DownloadSpeed}" behaviors:FieldValidation.Rule="Double"/>
-            <CheckBox  Grid.Row="1" Grid.Column="2" Content="Random" IsChecked="{Binding RandomDownload}" VerticalAlignment="Center"
-                       ToolTip.Tip="Same smooth variation for the download rate, independent of the upload one."/>
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelUploadSpeed}" VerticalAlignment="Center"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Classes="num" Text="{Binding UploadSpeed}" behaviors:FieldValidation.Rule="Double"
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelUploadSpeed}"/>
+            <CheckBox  Grid.Row="0" Grid.Column="2" Content="{x:Static loc:Strings.Random}" IsChecked="{Binding RandomUpload}" VerticalAlignment="Center"
+                       ToolTip.Tip="{x:Static loc:Strings.RandomUploadTip}"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelDownloadSpeed}" VerticalAlignment="Center"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Classes="num" Text="{Binding DownloadSpeed}" behaviors:FieldValidation.Rule="Double"
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelDownloadSpeed}"/>
+            <CheckBox  Grid.Row="1" Grid.Column="2" Content="{x:Static loc:Strings.Random}" IsChecked="{Binding RandomDownload}" VerticalAlignment="Center"
+                       ToolTip.Tip="{x:Static loc:Strings.RandomDownloadTip}"/>
           </Grid>
 
         </StackPanel>
@@ -166,26 +182,29 @@
       <!-- Options -->
       <Border Classes="group">
         <StackPanel Spacing="6">
-          <TextBlock Classes="grouphead" Text="Options"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupOptions}"/>
           <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="6" ColumnSpacing="6">
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Interval (s)"/>
-            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding IntervalText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
-            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Finished (%)"/>
-            <TextBox   Grid.Row="0" Grid.Column="3" Text="{Binding FinishedText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Double"/>
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelInterval}"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding IntervalText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelInterval}"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelFinished}"/>
+            <TextBox   Grid.Row="0" Grid.Column="3" Text="{Binding FinishedText}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Double"
+                       ToolTip.Tip="{x:Static loc:Strings.FinishedTip}" AutomationProperties.Name="{x:Static loc:Strings.LabelFinished}"/>
 
-            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Client"/>
-            <ComboBox  Grid.Row="1" Grid.Column="1" ItemsSource="{Binding ClientFamilies}"
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelClient}"/>
+            <ComboBox  Grid.Row="1" Grid.Column="1" ItemsSource="{Binding ClientFamilies}" AutomationProperties.Name="{x:Static loc:Strings.LabelClient}"
                        SelectedItem="{Binding SelectedFamily}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
-            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="Version"/>
-            <ComboBox  Grid.Row="1" Grid.Column="3" ItemsSource="{Binding Versions}"
+            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelVersion}"/>
+            <ComboBox  Grid.Row="1" Grid.Column="3" ItemsSource="{Binding Versions}" AutomationProperties.Name="{x:Static loc:Strings.LabelVersion}"
                        SelectedItem="{Binding SelectedVersion}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
 
-            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Stop"/>
+            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelStop}"/>
             <ComboBox  Grid.Row="2" Grid.Column="1" ItemsSource="{Binding StopWhenOptions}" GotFocus="OnStopInteraction"
-                       SelectedItem="{Binding SelectedStopWhen}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelStop}"
+                       SelectedItem="{Binding SelectedStopOption}" HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
             <StackPanel Grid.Row="2" Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
               <Panel>
-                <TextBox Width="60" Text="{Binding StopValue}" IsVisible="{Binding StopValueVisible}"
+                <TextBox Width="60" Text="{Binding StopValue}" IsVisible="{Binding StopValueVisible}" AutomationProperties.Name="{x:Static loc:Strings.StopValueName}"
                          IsEnabled="{Binding InputsEnabled}" GotFocus="OnStopInteraction" behaviors:FieldValidation.Rule="Double"/>
                 <Border Classes="pulseoverlay" Classes.pulse="{Binding StopValuePulsing}"
                         BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="1.5"
@@ -200,21 +219,28 @@
       <!-- Custom client simulation -->
       <Border Name="CustomClientCard" Classes="group">
         <StackPanel Spacing="6">
-          <TextBlock Classes="grouphead" Text="Custom client simulation"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupIdentity}"/>
           <Grid ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="6">
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Client key"/>
-            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding CustomKey}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"/>
-            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Port"/>
-            <TextBox   Grid.Row="0" Grid.Column="3" Width="74" Text="{Binding CustomPort}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
-            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Peer ID"/>
-            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding CustomPeerId}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"/>
-            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="Peers"/>
-            <TextBox   Grid.Row="1" Grid.Column="3" Width="74" Text="{Binding CustomPeers}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelKey}"/>
+            <TextBox   Grid.Row="0" Grid.Column="1" Text="{Binding CustomKey}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"
+                       FlowDirection="LeftToRight" AutomationProperties.Name="{x:Static loc:Strings.LabelKey}"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelPort}"/>
+            <TextBox   Grid.Row="0" Grid.Column="3" Width="96" Text="{Binding CustomPort}" PlaceholderText="{Binding PortPlaceholder}"
+                       IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int" FlowDirection="LeftToRight"
+                       ToolTip.Tip="{x:Static loc:Strings.PortTip}" AutomationProperties.Name="{x:Static loc:Strings.LabelPort}"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelPeerId}"/>
+            <TextBox   Grid.Row="1" Grid.Column="1" Text="{Binding CustomPeerId}" IsEnabled="{Binding InputsEnabled}" FontFamily="{DynamicResource MonoFontFamily}"
+                       FlowDirection="LeftToRight" AutomationProperties.Name="{x:Static loc:Strings.LabelPeerId}"/>
+            <TextBlock Grid.Row="1" Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelPeers}"/>
+            <TextBox   Grid.Row="1" Grid.Column="3" Width="96" Text="{Binding CustomPeers}" PlaceholderText="{Binding PeersPlaceholder}"
+                       IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int" FlowDirection="LeftToRight"
+                       ToolTip.Tip="{x:Static loc:Strings.PeersTip}" AutomationProperties.Name="{x:Static loc:Strings.LabelPeers}"/>
           </Grid>
           <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-            <CheckBox Grid.Column="0" VerticalAlignment="Center" Content="Realistic mode" IsChecked="{Binding RealisticMode}" IsEnabled="{Binding InputsEnabled}"
-                      ToolTip.Tip="Answers connecting peers with a real BitTorrent handshake + a full bitfield, so the session looks like a genuine seeder on the wire. Speed variation is controlled by the Random checkboxes in Speed options."/>
-            <Button Grid.Column="1" Content="Regenerate" Classes="ghost" Command="{Binding RegenerateValuesCommand}" IsEnabled="{Binding InputsEnabled}" ToolTip.Tip="Generate a new client key and peer ID."/>
+            <CheckBox Grid.Column="0" VerticalAlignment="Center" Content="{x:Static loc:Strings.RealisticMode}" IsChecked="{Binding RealisticMode}" IsEnabled="{Binding InputsEnabled}"
+                      ToolTip.Tip="{x:Static loc:Strings.RealisticModeTip}"/>
+            <Button Grid.Column="1" Content="{x:Static loc:Strings.Regenerate}" Classes="ghost" Command="{Binding RegenerateValuesCommand}" IsEnabled="{Binding InputsEnabled}"
+                    ToolTip.Tip="{x:Static loc:Strings.RegenerateTip}"/>
           </Grid>
         </StackPanel>
       </Border>
@@ -229,11 +255,13 @@
       <!-- Other settings -->
       <Border Grid.Row="0" Classes="group">
         <StackPanel Spacing="6">
-          <TextBlock Classes="grouphead" Text="Other settings"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupOther}"/>
           <!-- WrapPanel so the checkboxes wrap onto new lines when narrow instead of overflowing to the right. -->
           <WrapPanel>
-            <CheckBox Content="Use TCP listener" Margin="0,0,18,4" IsChecked="{Binding UseTcpListener}" IsEnabled="{Binding CanToggleSession}" ToolTip.Tip="Listen for incoming BitTorrent connections on the configured port. Another application using that port prevents the listener from opening."/>
-            <CheckBox Content="Request scrape" Margin="0,0,18,4" IsChecked="{Binding RequestScrape}" ToolTip.Tip="Request seeder and leecher counts from the tracker when the announce response does not include them. Some trackers do not support scrape."/>
+            <CheckBox Content="{x:Static loc:Strings.UseListener}" Margin="0,0,18,4" IsChecked="{Binding UseTcpListener}" IsEnabled="{Binding CanToggleSession}"
+                      ToolTip.Tip="{x:Static loc:Strings.UseListenerTip}"/>
+            <CheckBox Content="{x:Static loc:Strings.RequestScrape}" Margin="0,0,18,4" IsChecked="{Binding RequestScrape}"
+                      ToolTip.Tip="{x:Static loc:Strings.RequestScrapeTip}"/>
           </WrapPanel>
         </StackPanel>
       </Border>
@@ -241,20 +269,24 @@
       <!-- Proxy -->
       <Border Grid.Row="1" Classes="group">
         <StackPanel Spacing="6">
-          <TextBlock Classes="grouphead" Text="Proxy server settings"/>
-          <Grid ColumnDefinitions="Auto,90,Auto,*,Auto,64" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="6">
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Type"/>
-            <ComboBox Grid.Row="0" Grid.Column="1" Name="ProxyTypeBox" ItemsSource="{Binding ProxyTypes}" SelectedItem="{Binding SelectedProxyType}"
-                      HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}"/>
-            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="Host"/>
-            <TextBox Grid.Row="0" Grid.Column="3" Name="ProxyHostBox" Text="{Binding ProxyHost}" IsEnabled="{Binding InputsEnabled}"/>
-            <TextBlock Grid.Row="0" Grid.Column="4" Classes="label" Text="Port"/>
-            <TextBox Grid.Row="0" Grid.Column="5" Name="ProxyPortBox" Text="{Binding ProxyPort}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"/>
+          <TextBlock Classes="grouphead" Text="{x:Static loc:Strings.GroupProxy}"/>
+          <Grid ColumnDefinitions="Auto,110,Auto,*,Auto,64" RowDefinitions="Auto,Auto" RowSpacing="6" ColumnSpacing="6">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelProxyType}"/>
+            <ComboBox Grid.Row="0" Grid.Column="1" Name="ProxyTypeBox" ItemsSource="{Binding ProxyTypes}" SelectedItem="{Binding SelectedProxyOption}"
+                      HorizontalAlignment="Stretch" IsEnabled="{Binding InputsEnabled}" AutomationProperties.Name="{x:Static loc:Strings.LabelProxyType}"/>
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelProxyHost}"/>
+            <TextBox Grid.Row="0" Grid.Column="3" Name="ProxyHostBox" Text="{Binding ProxyHost}" IsEnabled="{Binding InputsEnabled}" FlowDirection="LeftToRight"
+                     AutomationProperties.Name="{x:Static loc:Strings.LabelProxyHost}"/>
+            <TextBlock Grid.Row="0" Grid.Column="4" Classes="label" Text="{x:Static loc:Strings.LabelPort}"/>
+            <TextBox Grid.Row="0" Grid.Column="5" Name="ProxyPortBox" Text="{Binding ProxyPort}" IsEnabled="{Binding InputsEnabled}" behaviors:FieldValidation.Rule="Int"
+                     FlowDirection="LeftToRight" AutomationProperties.Name="{x:Static loc:Strings.ProxyPortName}"/>
             <Grid Grid.Row="1" Grid.ColumnSpan="6" ColumnDefinitions="Auto,*,Auto,*" ColumnSpacing="6">
-              <TextBlock Grid.Column="0" Classes="label" Text="User"/>
-              <TextBox Grid.Column="1" Name="ProxyUserBox" Text="{Binding ProxyUser}" IsEnabled="{Binding InputsEnabled}"/>
-              <TextBlock Grid.Column="2" Classes="label" Text="Pass"/>
-              <TextBox Grid.Column="3" Name="ProxyPassBox" Text="{Binding ProxyPass}" PasswordChar="•" IsEnabled="{Binding InputsEnabled}"/>
+              <TextBlock Grid.Column="0" Classes="label" Text="{x:Static loc:Strings.LabelProxyUser}"/>
+              <TextBox Grid.Column="1" Name="ProxyUserBox" Text="{Binding ProxyUser}" IsEnabled="{Binding InputsEnabled}" FlowDirection="LeftToRight"
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelProxyUser}"/>
+              <TextBlock Grid.Column="2" Classes="label" Text="{x:Static loc:Strings.LabelProxyPassword}"/>
+              <TextBox Grid.Column="3" Name="ProxyPassBox" Text="{Binding ProxyPass}" PasswordChar="•" IsEnabled="{Binding InputsEnabled}" FlowDirection="LeftToRight"
+                       AutomationProperties.Name="{x:Static loc:Strings.LabelProxyPassword}"/>
             </Grid>
           </Grid>
         </StackPanel>
@@ -264,20 +296,22 @@
       <Border Name="ActivityCard" Grid.Row="2" Classes="group">
         <Grid Name="ActivityGrid" RowDefinitions="Auto,70,*,27">
           <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto">
-            <TextBlock Grid.Column="0" Classes="grouphead" Text="Activity" VerticalAlignment="Center" Margin="0"/>
-            <CheckBox Grid.Column="1" Content="Enable log" IsChecked="{Binding EnableLog}" Margin="14,0,0,0" VerticalAlignment="Center" ToolTip.Tip="Show tracker requests, responses and session events in the terminal."/>
+            <TextBlock Grid.Column="0" Classes="grouphead" Text="{x:Static loc:Strings.GroupActivity}" VerticalAlignment="Center" Margin="0"/>
+            <CheckBox Grid.Column="1" Content="{x:Static loc:Strings.EnableLog}" IsChecked="{Binding EnableLog}" Margin="14,0,0,0" VerticalAlignment="Center"
+                      ToolTip.Tip="{x:Static loc:Strings.EnableLogTip}"/>
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
-              <Button Content="Clear" Classes="ghost" Command="{Binding ClearLogCommand}" ToolTip.Tip="Clear the terminal log and graph without resetting torrent counters."/>
-              <Button Content="Save" Classes="ghost" Click="OnSaveLogClick" ToolTip.Tip="Save displayed log lines, including the current filter, to a text file."/>
-              <Button Content="⋯" Classes="ghost" Padding="5,0" MinWidth="26" ToolTip.Tip="Filter, copy and follow the log">
+              <Button Content="{x:Static loc:Strings.Clear}" Classes="ghost" Command="{Binding ClearLogCommand}" ToolTip.Tip="{x:Static loc:Strings.ClearTip}"/>
+              <Button Content="{x:Static loc:Strings.Save}" Classes="ghost" Click="OnSaveLogClick" ToolTip.Tip="{x:Static loc:Strings.SaveLogTip}"/>
+              <Button Content="⋯" Classes="ghost" Padding="5,0" MinWidth="26" ToolTip.Tip="{x:Static loc:Strings.LogOptions}"
+                      AutomationProperties.Name="{x:Static loc:Strings.LogOptions}">
                 <Button.Flyout>
                   <Flyout>
-                    <StackPanel Spacing="8" Width="220">
-                      <TextBlock Text="Filter displayed lines"/>
-                      <TextBox Text="{Binding LogFilter}" PlaceholderText="Search log…"/>
-                      <Button Content="Clear filter" Command="{Binding ClearLogFilterCommand}"/>
-                      <CheckBox Content="Follow new log entries" IsChecked="{Binding FollowLog}"/>
-                      <Button Content="Copy displayed lines" Click="OnCopyLogClick"/>
+                    <StackPanel Spacing="8" Width="240">
+                      <TextBlock Text="{x:Static loc:Strings.FilterLines}" TextWrapping="Wrap"/>
+                      <TextBox Text="{Binding LogFilter}" PlaceholderText="{x:Static loc:Strings.SearchLog}" AutomationProperties.Name="{x:Static loc:Strings.FilterLines}"/>
+                      <Button Content="{x:Static loc:Strings.ClearFilter}" Command="{Binding ClearLogFilterCommand}"/>
+                      <CheckBox Content="{x:Static loc:Strings.FollowLog}" IsChecked="{Binding FollowLog}"/>
+                      <Button Content="{x:Static loc:Strings.CopyLines}" Click="OnCopyLogClick"/>
                     </StackPanel>
                   </Flyout>
                 </Button.Flyout>
@@ -285,12 +319,12 @@
             </StackPanel>
           </Grid>
 
-          <!-- Fixed graph viewport inside the scrollable page. -->
+          <!-- Fixed graph viewport inside the scrollable page. Time flows left to right in every language. -->
           <Border Name="GraphBorder" Grid.Row="1" MinHeight="64" Background="{DynamicResource LogBgBrush}" BorderBrush="{DynamicResource DarkBorderFaintBrush}"
                   BorderThickness="1" CornerRadius="4" Margin="0,6,0,0">
             <Panel ClipToBounds="True">
-              <controls:Sparkline Values="{Binding GraphValues}" Margin="1"/>
-              <TextBlock Classes="mini" Text="Upload rate" Margin="7,4,0,0" VerticalAlignment="Top" HorizontalAlignment="Left"/>
+              <controls:Sparkline Values="{Binding GraphValues}" Margin="1" FlowDirection="LeftToRight"/>
+              <TextBlock Classes="mini" Text="{x:Static loc:Strings.UploadRate}" Margin="7,4,7,0" VerticalAlignment="Top" HorizontalAlignment="Left"/>
             </Panel>
           </Border>
 
@@ -298,6 +332,7 @@
           <Border Name="LogBorder" Grid.Row="2" MinHeight="118" Background="{DynamicResource LogBgBrush}"
                   BorderThickness="1" CornerRadius="4" Margin="0,6,0,0" ClipToBounds="True" Classes.focused="{Binding #LogBox.IsFocused}">
             <TextBox Name="LogBox" Classes="terminal" Text="{Binding VisibleLogText}" IsReadOnly="True" CaretBrush="Transparent" AcceptsReturn="True"
+                     FlowDirection="LeftToRight" AutomationProperties.Name="{x:Static loc:Strings.GroupActivity}"
                      TextWrapping="NoWrap" Background="Transparent" BorderThickness="0"
                      FontFamily="{DynamicResource MonoFontFamily}" FontSize="9.5"
                      Foreground="{DynamicResource TextSecondaryBrush}" VerticalContentAlignment="Top"
@@ -308,9 +343,9 @@
           <!-- Alert line: the CURRENT engine condition (green OK / yellow warning / red error), as opposed
                to the append-only log above. The row is ALWAYS reserved (fixed MinHeight, no IsVisible
                toggle) so a message appearing or clearing can never shift the layout. One line only —
-               overflow is ellipsised; the full text stays in the log. -->
+               overflow is ellipsised and the full text is in the tooltip. -->
           <Border Grid.Row="3" MinHeight="22" Margin="0,5,0,0">
-            <TextBlock Name="SessionAlert" Text="{Binding AlertMessage}" FontWeight="SemiBold" FontSize="11.5"
+            <TextBlock Name="SessionAlert" Text="{Binding AlertMessage}" ToolTip.Tip="{Binding AlertMessage}" FontWeight="SemiBold" FontSize="11.5"
                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxLines="1"
                        Foreground="{Binding AlertLevel, Converter={x:Static views:BoolBrushConverters.AlertText}}"/>
           </Border>
@@ -320,17 +355,21 @@
       <!-- Action buttons — 4-across when wide; the code-behind reflows them to 2x2 when narrow. -->
       <Grid Name="ActionBar" Grid.Row="3" ColumnDefinitions="*,*,*,*" RowDefinitions="44" VerticalAlignment="Bottom" ColumnSpacing="6" RowSpacing="6">
         <Panel Grid.Column="0">
-          <Button Classes="accent action" Content="{Binding PrimaryActionText}" Classes.paused="{Binding IsPaused}" Command="{Binding StartCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="Start, pause or resume this session. Pausing keeps scheduled tracker updates running."/>
+          <Button Classes="accent action" Content="{Binding PrimaryActionText}" Classes.paused="{Binding IsPaused}" Command="{Binding StartCommand}"
+                  HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="{x:Static loc:Strings.StartTip}"/>
           <Border Classes="pulseoverlay" Classes.pulse="{Binding StartButtonPulsing}"
                   BorderBrush="{DynamicResource StateErrorBrush}" BorderThickness="2"
                   CornerRadius="4" IsHitTestVisible="False"/>
         </Panel>
-        <Button Grid.Column="1" Classes="danger action" Content="STOP" Command="{Binding StopCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="Stop this torrent session."/>
-        <Button Grid.Column="2" Classes="action adaptive-label" Command="{Binding ManualUpdateCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="Review the warning and time remaining before sending a manual tracker update.">
-          <TextBlock Name="ManualUpdateLabel" Text="Manual update" TextWrapping="NoWrap" TextAlignment="Center" VerticalAlignment="Center" SizeChanged="OnActionLabelSizeChanged"/>
+        <Button Grid.Column="1" Classes="danger action" Content="{x:Static loc:Strings.ActionStop}" Command="{Binding StopCommand}"
+                HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="{x:Static loc:Strings.StopTip}"/>
+        <Button Grid.Column="2" Classes="action adaptive-label" Command="{Binding ManualUpdateCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44"
+                ToolTip.Tip="{Binding ManualUpdateHint}" ToolTip.ShowOnDisabled="True" AutomationProperties.Name="{x:Static loc:Strings.ActionManualUpdate}">
+          <TextBlock Name="ManualUpdateLabel" Text="{x:Static loc:Strings.ActionManualUpdate}" TextWrapping="NoWrap" TextAlignment="Center" VerticalAlignment="Center" SizeChanged="OnActionLabelSizeChanged"/>
         </Button>
-        <Button Grid.Column="3" Classes="action adaptive-label" Command="{Binding SetDefaultsCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44" ToolTip.Tip="Restore default settings for this tab.">
-          <TextBlock Name="DefaultsLabel" Text="Set defaults" TextWrapping="NoWrap" TextAlignment="Center" VerticalAlignment="Center" SizeChanged="OnActionLabelSizeChanged"/>
+        <Button Grid.Column="3" Classes="action adaptive-label" Command="{Binding SetDefaultsCommand}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="44"
+                ToolTip.Tip="{x:Static loc:Strings.SetDefaultsTip}" AutomationProperties.Name="{x:Static loc:Strings.ActionSetDefaults}">
+          <TextBlock Name="DefaultsLabel" Text="{x:Static loc:Strings.ActionSetDefaults}" TextWrapping="NoWrap" TextAlignment="Center" VerticalAlignment="Center" SizeChanged="OnActionLabelSizeChanged"/>
         </Button>
       </Grid>
     </Grid>
@@ -350,17 +389,17 @@
               BorderThickness="1" CornerRadius="8" Padding="18">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="12">
-            <TextBlock Text="Confirm manual update" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
-            <TextBlock Text="Repeated manual updates can make your activity stand out to the tracker and may lead to a ban."
-                       TextWrapping="Wrap"/>
-            <TextBlock Text="If the ratio on your tracker profile has not changed, wait for the next scheduled update. The website may also take time to refresh."
-                       TextWrapping="Wrap"/>
-            <TextBlock Text="Next scheduled update in:" TextWrapping="Wrap"/>
-            <TextBlock Text="{Binding NextUpdateCountdown}" FontSize="22" FontWeight="Bold"
+            <TextBlock Text="{x:Static loc:Strings.ManualConfirmTitle}" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.ManualConfirmWarning}" TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.ManualConfirmAdvice}" TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.ManualConfirmNext}" TextWrapping="Wrap"/>
+            <TextBlock Text="{Binding NextUpdateCountdown}" FontSize="22" FontWeight="Bold" FlowDirection="LeftToRight" HorizontalAlignment="Left"
                        FontFamily="{DynamicResource MonoFontFamily}"/>
             <WrapPanel HorizontalAlignment="Right">
-              <Button Name="CancelUpdateButton" Content="Keep waiting" Command="{Binding CancelManualUpdateCommand}" Margin="0,0,8,6" ToolTip.Tip="Cancel this request and keep the scheduled update."/>
-              <Button Content="Update now" Command="{Binding ConfirmManualUpdateCommand}" Margin="0,0,0,6" ToolTip.Tip="Send one manual update after confirming the warning."/>
+              <Button Name="CancelUpdateButton" Content="{x:Static loc:Strings.KeepWaiting}" Command="{Binding CancelManualUpdateCommand}" Margin="0,0,8,6"
+                      ToolTip.Tip="{x:Static loc:Strings.KeepWaitingTip}"/>
+              <Button Content="{x:Static loc:Strings.UpdateNow}" Command="{Binding ConfirmManualUpdateCommand}" Margin="0,0,0,6"
+                      ToolTip.Tip="{x:Static loc:Strings.UpdateNowTip}"/>
             </WrapPanel>
           </StackPanel>
         </ScrollViewer>

@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text;
 using RatioMaster.BitTorrent;
 using RatioMaster.Engine;
+using RatioMaster.Services;
 using RatioMaster.Models;
 
 /// <summary>Deterministic session transitions and loopback-only listener isolation.</summary>
@@ -45,6 +46,14 @@ internal static class EngineLifecycleSelfTest
         await Check("key rotation applies profile deadlines to announces and preserves custom values", KeyRotationAsync);
         await Check("listener collision, hash isolation and live cancellation", ListenerIsolationAsync);
         await Check("HTTP fragment removal, scrape, tracker ID, warnings and decode diagnostics", TrackerMetadataAsync);
+        await Check("a refused completed is retried while running, and final after repeated refusals", RefusedCompletionAsync);
+        await Check("a pending completed is sent before stopped when the user stops", ManualStopCompletionAsync);
+        await Check("announces report the transfer of this session, not the totals of earlier ones", SessionCountersAsync);
+        await Check("public address parameters follow the profile and are escaped like its other values", AddressParametersAsync);
+        await Check("regular and manual announce timing follow each client's own defaults", ClientTimingAsync);
+        await Check("stopped is only sent to a tracker that accepted started", StoppedNeedsStartedAsync);
+        await Check("a tracker keeping the connection open answers a request without Connection: close", KeepAliveTrackerAsync);
+        await Check("a refused scrape ends scraping, not the session", ScrapeRefusalAsync);
         return passed;
     }
 
@@ -58,8 +67,8 @@ internal static class EngineLifecycleSelfTest
                 engine.Start(Configuration(total: long.MaxValue, finished: percent));
                 await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
                 EngineStats stats = engine.GetStats();
-                Require(stats.Downloaded == expected && stats.Left == long.MaxValue - expected,
-                    "Initial progress must not lose bytes or overflow at the engine size limit.");
+                Require(stats.Have == expected && stats.Left == long.MaxValue - expected && stats.Downloaded == 0,
+                    "Initial progress must not lose bytes or overflow at the engine size limit, and is not downloaded data.");
             }
             finally { await engine.StopAsync(); }
         }
@@ -152,7 +161,7 @@ internal static class EngineLifecycleSelfTest
         RatioEngine engine = new(new Host(), clock, (_, _) =>
         {
             if (Volatile.Read(ref mode) == 2) throw new IOException("fixture retry");
-            return Task.FromResult(Volatile.Read(ref mode) == 0 ? Response(interval: 999999, minimum: 172800) : Response(interval: 1, minimum: 120));
+            return Task.FromResult(Volatile.Read(ref mode) == 0 ? Response(interval: 999999, minimum: 172800) : Response(interval: 1, minimum: 400));
         }, automaticTicks: false);
         try
         {
@@ -160,11 +169,16 @@ internal static class EngineLifecycleSelfTest
             await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
             Require(engine.GetStats().IntervalRemaining == 999999, "A supported tracker interval must not be shortened to the configurable one-day limit.");
             Volatile.Write(ref mode, 1);
+            Require(!await engine.ManualUpdateAsync() && engine.GetStats().ManualUpdateWait == 172800,
+                "A manual update must wait for the tracker's minimum interval.");
+            clock.Advance(172800);
             Require(await engine.ManualUpdateAsync(), "Manual update must accept the fixture response.");
-            Require(engine.GetStats().IntervalRemaining == 120, "The tracker minimum must dominate a smaller interval.");
+            Require(engine.GetStats().IntervalRemaining == 400, "The tracker minimum must dominate a smaller interval and the client's floor.");
             Volatile.Write(ref mode, 2);
+            clock.Advance(400);
             Require(!await engine.ManualUpdateAsync(), "A transport failure must not report acceptance.");
-            Require(engine.IsRunning && engine.GetStats().IntervalRemaining == 120, "A retry must retain the accepted minimum deadline.");
+            Require(engine.IsRunning && engine.GetStats().IntervalRemaining == 60,
+                "Once the tracker minimum has elapsed, a transport failure schedules the short retry without stopping.");
             Volatile.Write(ref mode, 1);
         }
         finally { Volatile.Write(ref mode, 1); await engine.StopAsync(); }
@@ -323,8 +337,9 @@ internal static class EngineLifecycleSelfTest
                 engine.Tick();
                 await engine.StopAsync();
                 Require(!engine.FinishedSuccessfully && engine.StopError.Contains("fixture final rejection", StringComparison.Ordinal), "A rejected final event must expose failure.");
-                string[] expected = rejectedEvent == "completed" ? new[] { "started", "completed" } : new[] { "started", "completed", "stopped" };
-                Require(events.ToArray().SequenceEqual(expected), "No further announce may follow an explicit rejection.");
+                // A refused completed still leaves the swarm properly; a refused stopped is the last word.
+                Require(events.ToArray().SequenceEqual(new[] { "started", "completed", "stopped" }),
+                    "A refused completed must still be followed by stopped, and nothing may follow a refused stopped.");
             }
             finally { await engine.StopAsync(); }
         }
@@ -487,40 +502,384 @@ internal static class EngineLifecycleSelfTest
 
     private static async Task ListenerIsolationAsync()
     {
-        TcpListener reservation = new(IPAddress.Loopback, 0);
-        reservation.Start();
-        int port = ((IPEndPoint)reservation.LocalEndpoint).Port;
-        reservation.Stop();
+        int port = FreePort();
+        PeerListenerHub hub = new();
         Host firstHost = new() { UseTcpListener = true };
-        RatioEngine first = new(firstHost, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false);
-        RatioEngine second = new(new Host { UseTcpListener = true }, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false);
+        RatioEngine first = new(firstHost, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false, listenerHub: hub);
+        RatioEngine second = new(new Host { UseTcpListener = true }, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false, listenerHub: hub);
+        RatioEngine twin;
         SessionConfig firstConfig = Configuration(port: port);
-        SessionConfig secondConfig = Configuration(port: port, hash: Enumerable.Repeat((byte)2, 20).ToArray());
-        bool collisionReported = false;
-        second.Alert += (_, message) => { if (message.StartsWith("TCP listener unavailable", StringComparison.Ordinal)) collisionReported = true; };
+        SessionConfig secondConfig = Configuration(port: port, hash: Enumerable.Repeat((byte)2, 20).ToArray(), peerId: "-qB5100-testsecond02");
+        SessionConfig secondPeer = secondConfig;
+        SessionConfig twinConfig = Configuration(port: port, peerId: "-qB5100-testtwin0003");
+        Host twinHost = new() { UseTcpListener = true };
+        twin = new(twinHost, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false, listenerHub: hub);
+        bool duplicateReported = false, firstListening = false;
+        TaskCompletionSource twinListening = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        string listening = "Listening for peers on port " + port;
+        first.Log += message => { if (message.StartsWith(listening, StringComparison.Ordinal)) firstListening = true; };
+        twin.Alert += (_, message) => { if (message.StartsWith("Another tab already answers peers", StringComparison.Ordinal)) duplicateReported = true; };
+        twin.Log += message => { if (message.StartsWith(listening, StringComparison.Ordinal)) twinListening.TrySetResult(); };
         try
         {
             first.Start(firstConfig);
             await WaitStats(first, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+            Require(firstListening, "The first successful bind must be logged.");
             firstConfig.InfoHash[0] = 9;
             byte[] reply = await Handshake(port, new byte[20]);
             Require(reply.Length == 68 && Encoding.Latin1.GetString(reply, 48, 20) == firstConfig.PeerID, "The listener must use its immutable hash and peer ID.");
             second.Start(secondConfig);
             await WaitStats(second, stats => !stats.IsAnnouncing && stats.Seeders == 4);
-            Require(collisionReported, "An occupied port must be reported to the owning session.");
-            Require((await Handshake(port, secondConfig.InfoHash)).Length == 0, "The first session must reject the other torrent's hash.");
+            reply = await Handshake(port, secondConfig.InfoHash);
+            Require(reply.Length == 68 && Encoding.Latin1.GetString(reply, 48, 20) == secondPeer.PeerID,
+                "Sessions sharing a port must each answer their own torrent with their own peer ID.");
+            Require((await Handshake(port, Enumerable.Repeat((byte)7, 20).ToArray())).Length == 0, "An unknown torrent must be refused.");
+            twin.Start(twinConfig);
+            await WaitStats(twin, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+            Require(duplicateReported, "A second session for the same torrent on the same port must be reported.");
             await second.StopAsync();
-            Require((await Handshake(port, new byte[20])).Length == 68, "Stopping a failed listener must not close the other session's listener.");
+            reply = await Handshake(port, new byte[20]);
+            Require(reply.Length == 68 && Encoding.Latin1.GetString(reply, 48, 20) == firstConfig.PeerID,
+                "Stopping another session must not close the listener, and the duplicate must stay silent.");
+            Require((await Handshake(port, secondConfig.InfoHash)).Length == 0, "A stopped session must no longer answer its torrent.");
+            await first.StopAsync();
+            await twinListening.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            reply = await Handshake(port, new byte[20]);
+            Require(reply.Length == 68 && Encoding.Latin1.GetString(reply, 48, 20) == twinConfig.PeerID,
+                "When the answering session stops, the duplicate takes over its torrent.");
             using TcpClient pending = new(AddressFamily.InterNetwork);
             await pending.ConnectAsync(IPAddress.Loopback, port);
-            firstHost.UseTcpListener = false;
-            first.Tick();
+            twinHost.UseTcpListener = false;
+            twin.RefreshListener();
             using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
             byte[] one = new byte[1];
             try { Require(await pending.GetStream().ReadAsync(one, timeout.Token) == 0, "Disabling the listener must close its accepted sockets."); }
             catch (IOException) { }
         }
-        finally { await first.StopAsync(); await second.StopAsync(); }
+        finally { await first.StopAsync(); await second.StopAsync(); await twin.StopAsync(); }
+
+        // A port held by another application, even on IPv4 only, is reported, and the session keeps announcing.
+        foreach (bool exclusive in new[] { true, false })
+        {
+            int occupiedPort = FreePort();
+            using TcpListener occupied = new(IPAddress.Any, occupiedPort);
+            occupied.Server.ExclusiveAddressUse = exclusive;
+            occupied.Start();
+            bool collisionReported = false;
+            RatioEngine blocked = new(new Host { UseTcpListener = true }, new ManualClock(), (_, _) => Task.FromResult(Response()), automaticTicks: false, listenerHub: new PeerListenerHub());
+            blocked.Alert += (_, message) => { if (message.StartsWith("TCP listener unavailable", StringComparison.Ordinal)) collisionReported = true; };
+            try
+            {
+                blocked.Start(Configuration(port: occupiedPort));
+                await WaitStats(blocked, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+                Require(collisionReported && blocked.IsRunning, "An occupied port must be reported to the owning session without stopping it.");
+            }
+            finally { await blocked.StopAsync(); }
+        }
+    }
+
+    private static int FreePort()
+    {
+        TcpListener reservation = new(IPAddress.Loopback, 0);
+        reservation.Start();
+        int port = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        reservation.Stop();
+        return port;
+    }
+
+    private static async Task RefusedCompletionAsync()
+    {
+        foreach (int refusals in new[] { 2, 3 })
+        {
+            ManualClock clock = new();
+            ConcurrentQueue<string> events = new();
+            int refused = 0;
+            TaskCompletionSource<StopNotice> notice = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            Host host = new() { DownloadRateBytes = 100 };
+            RatioEngine engine = new(host, clock, (name, _) =>
+            {
+                events.Enqueue(name);
+                if (name == "completed" && Interlocked.Increment(ref refused) <= refusals)
+                    throw new TrackerRejectedException("min announce time");
+                return Task.FromResult(Response(interval: 1800));
+            }, automaticTicks: false);
+            engine.Stopped += stop => notice.TrySetResult(stop);
+            try
+            {
+                engine.Start(Configuration(total: 100, finished: 0));
+                await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+                clock.Advance(1);
+                engine.Tick();
+                await WaitStats(engine, stats => !stats.IsAnnouncing && events.Count >= 2);
+                Require(!await engine.ManualUpdateAsync() && engine.GetStats().ManualUpdateWait == 60,
+                    "A manual update must wait for the retry of a refused completed.");
+                for (int attempt = 1; attempt < 3 && engine.IsRunning; attempt++)
+                {
+                    clock.Advance(60);
+                    engine.Tick();
+                    await WaitStats(engine, stats => !stats.IsAnnouncing && events.Count >= 2 + attempt || !engine.IsRunning);
+                }
+                if (refusals == 2)
+                {
+                    Require(engine.IsRunning && !engine.GetStats().CompletionPending && events.Count(name => name == "completed") == 3,
+                        "Two refusals must leave the session running and the third completed must be accepted.");
+                }
+                else
+                {
+                    StopNotice final = await notice.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Require(!engine.IsRunning && final.IsError && final.Reason.Contains("min announce time", StringComparison.Ordinal),
+                        "A third refusal of the same completed must end the session as a rejection.");
+                    Require(!events.Contains("stopped"), "A final rejection is not followed by stopped.");
+                }
+            }
+            finally { await engine.StopAsync(); }
+        }
+    }
+
+    private static async Task ManualStopCompletionAsync()
+    {
+        ManualClock clock = new();
+        ConcurrentQueue<string> events = new();
+        int completedAttempts = 0;
+        RatioEngine engine = new(new Host { DownloadRateBytes = 100 }, clock, (name, _) =>
+        {
+            events.Enqueue(name);
+            if (name == "completed" && Interlocked.Increment(ref completedAttempts) == 1) throw new IOException("fixture timeout");
+            return Task.FromResult(Response());
+        }, automaticTicks: false);
+        try
+        {
+            engine.Start(Configuration(total: 100, finished: 0));
+            await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+            clock.Advance(1);
+            engine.Tick();
+            await WaitStats(engine, stats => !stats.IsAnnouncing && events.Count >= 2);
+            Require(engine.GetStats().CompletionPending, "A failed completed stays pending.");
+            await engine.StopAsync();
+            Require(events.ToArray().SequenceEqual(new[] { "started", "completed", "completed", "stopped" }),
+                "Stopping by hand must deliver the pending completed before stopped: " + string.Join(",", events));
+        }
+        finally { await engine.StopAsync(); }
+    }
+
+    private static async Task SessionCountersAsync()
+    {
+        using TcpListener tracker = new(IPAddress.Loopback, 0);
+        tracker.Start();
+        int port = ((IPEndPoint)tracker.LocalEndpoint).Port;
+        ConcurrentQueue<string> requests = new();
+        using CancellationTokenSource done = new();
+        Task server = Task.Run(async () =>
+        {
+            try
+            {
+                while (!done.IsCancellationRequested)
+                {
+                    using TcpClient peer = await tracker.AcceptTcpClientAsync(done.Token);
+                    using NetworkStream stream = peer.GetStream();
+                    using StreamReader reader = new(stream, Encoding.Latin1, leaveOpen: true);
+                    string line = await reader.ReadLineAsync(done.Token) ?? string.Empty;
+                    while (await reader.ReadLineAsync(done.Token) is { Length: > 0 }) { }
+                    requests.Enqueue(line);
+                    byte[] body = Response().Encode();
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n"), done.Token);
+                    await stream.WriteAsync(body, done.Token);
+                }
+            }
+            catch (OperationCanceledException) when (done.IsCancellationRequested) { }
+            catch (SocketException) when (done.IsCancellationRequested) { }
+        });
+        ManualClock clock = new();
+        RatioEngine engine = new(new Host { UploadRateBytes = 10, DownloadRateBytes = 20 }, clock, automaticTicks: false);
+        try
+        {
+            engine.Start(new SessionConfig
+            {
+                Client = ClientCatalog.Create("qBittorrent", "5.2.4"), Proxy = new(), Tracker = $"http://127.0.0.1:{port}/announce",
+                HashHex = new string('0', 40), InfoHash = new byte[20], TotalLength = 10000, FinishedPercent = 0, InitialHave = 5000,
+                Interval = 1800, Port = "6881", Key = "ABC12345", PeerID = "-qB5240-sessioncount", NumWant = "20",
+                ResumeUploaded = 7000, ResumeDownloaded = 3000,
+            });
+            await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+            string started = requests.First();
+            Require(started.Contains("&uploaded=0&downloaded=0&left=5000&", StringComparison.Ordinal),
+                "The started announce of a resumed torrent reports nothing transferred yet and the exact bytes left: " + started);
+            clock.Advance(10);
+            engine.Tick();
+            Require(await engine.ManualUpdateAsync(), "The regular update must be accepted.");
+            string update = requests.Last(line => !line.Contains("event=", StringComparison.Ordinal));
+            Require(update.Contains("&uploaded=100&downloaded=200&left=4800&", StringComparison.Ordinal),
+                "Regular updates report this session's growth only: " + update);
+            EngineStats stats = engine.GetStats();
+            Require(stats.Uploaded == 7100 && stats.Downloaded == 3200 && stats.Have == 5200,
+                "Displayed totals keep the earlier sessions while announces stay session-relative.");
+        }
+        finally
+        {
+            await engine.StopAsync();
+            done.Cancel();
+            tracker.Stop();
+            await server;
+        }
+    }
+
+    private static Task AddressParametersAsync()
+    {
+        System.Collections.Generic.IReadOnlyList<IPAddress> addresses = [IPAddress.Parse("203.0.113.9"), IPAddress.Parse("2001:db8::1")];
+        string transmission = RatioEngine.BuildAnnounceUrl(ClientCatalog.Create("Transmission", "4.1.3"), "http://t.invalid/announce", new byte[20],
+            "-TR4130-abcdefghij0z", "51413", string.Empty, 0, 0, 0, "0A1B2C3D", "80", string.Empty, addresses);
+        Require(transmission.EndsWith("&ipv4=203.0.113.9&ipv6=2001%3ADB8%3A%3A1", StringComparison.OrdinalIgnoreCase)
+            && transmission.Contains("%3A", StringComparison.Ordinal), "Transmission escapes the addresses in upper-case hex: " + transmission);
+        string libtorrent = RatioEngine.BuildAnnounceUrl(ClientCatalog.Create("qBittorrent", "5.2.4"), "http://t.invalid/announce", new byte[20],
+            "-qB5240-abcdefghijkl", "6881", string.Empty, 0, 0, 0, "0A1B2C3D", "200", string.Empty, addresses);
+        Require(libtorrent.EndsWith("&ipv4=203.0.113.9&ipv6=2001%3adb8%3a%3a1", StringComparison.Ordinal), "libtorrent escapes in lower-case hex: " + libtorrent);
+        Require(NetInfo.IsGlobal(IPAddress.Parse("8.8.8.8")) && !NetInfo.IsGlobal(IPAddress.Parse("192.168.1.2")) && !NetInfo.IsGlobal(IPAddress.Parse("100.64.0.1"))
+            && NetInfo.IsGlobal(IPAddress.Parse("2a01:e0a::1")) && !NetInfo.IsGlobal(IPAddress.Parse("fd00::1")) && !NetInfo.IsGlobal(IPAddress.Parse("fe80::1")),
+            "Only public addresses are announced.");
+        return Task.CompletedTask;
+    }
+
+    private static async Task ClientTimingAsync()
+    {
+        foreach ((string family, string version, int regular, int manual) in new[]
+        {
+            ("qBittorrent", "5.2.4", 300, 30), ("Deluge", "2.2.0", 300, 30), ("Transmission", "4.1.3", 120, 120), ("uTorrent", "3.6.0", 120, 0),
+        })
+        {
+            RatioEngine engine = new(new Host(), new ManualClock(), (_, _) => Task.FromResult(Response(interval: 120, minimum: null)), automaticTicks: false);
+            try
+            {
+                engine.Start(Configuration(client: ClientCatalog.Create(family, version)));
+                await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+                EngineStats stats = engine.GetStats();
+                Require(stats.IntervalRemaining == regular && stats.ManualUpdateWait == manual,
+                    $"{family}: a 120-second interval without min interval gives {stats.IntervalRemaining}/{stats.ManualUpdateWait}, expected {regular}/{manual}.");
+            }
+            finally { await engine.StopAsync(); }
+        }
+    }
+
+    private static async Task StoppedNeedsStartedAsync()
+    {
+        ConcurrentQueue<string> events = new();
+        RatioEngine engine = new(new Host(), new ManualClock(), (name, _) =>
+        {
+            events.Enqueue(name);
+            throw new IOException("fixture tracker offline");
+        }, automaticTicks: false);
+        try
+        {
+            engine.Start(Configuration());
+            await WaitStats(engine, stats => !stats.IsAnnouncing && events.Count == 1);
+            await engine.StopAsync();
+            Require(events.ToArray().SequenceEqual(new[] { "started" }), "A tracker that never accepted started must not receive stopped.");
+        }
+        finally { await engine.StopAsync(); }
+    }
+
+    private static async Task KeepAliveTrackerAsync()
+    {
+        await using TrackerFixture tracker = new(_ => Response(), keepAlive: true);
+        RatioEngine engine = new(new Host(), new ManualClock(), automaticTicks: false);
+        try
+        {
+            engine.Start(Configuration(tracker: $"http://127.0.0.1:{tracker.Port}/announce", client: ClientCatalog.Create("Transmission", "4.1.3")));
+            await WaitStats(engine, stats => !stats.IsAnnouncing && stats.Seeders == 4);
+            Require(await engine.ManualUpdateAsync(), "A second request to a keep-alive tracker must complete too.");
+            Require(tracker.Requests.Count == 2 && tracker.Requests.All(request => !request.Contains("\nConnection:", StringComparison.OrdinalIgnoreCase)),
+                "Transmission sends no Connection header and must not wait for the tracker to close: " + string.Join(" | ", tracker.Requests));
+        }
+        finally { await engine.StopAsync(); }
+    }
+
+    private static async Task ScrapeRefusalAsync()
+    {
+        await using TrackerFixture tracker = new(line =>
+        {
+            if (!line.Contains("/scrape?", StringComparison.Ordinal)) return Response(seeders: null, leechers: null);
+            ValueDictionary refusal = new();
+            refusal.SetStringValue("failure reason", "scrape disabled");
+            return refusal;
+        });
+        RatioEngine engine = new(new Host { RequestScrape = true }, new ManualClock(), automaticTicks: false);
+        try
+        {
+            engine.Start(Configuration(tracker: $"http://127.0.0.1:{tracker.Port}/announce"));
+            await WaitStats(engine, stats => !stats.IsAnnouncing && tracker.Requests.Count == 2);
+            Require(engine.IsRunning, "A refused scrape must not stop the session.");
+            Require(await engine.ManualUpdateAsync() && tracker.Requests.Count == 3, "A refused scrape is not requested again.");
+        }
+        finally { await engine.StopAsync(); }
+    }
+
+    /// <summary>A loopback HTTP tracker answering every request line; with keep-alive it never closes first.</summary>
+    private sealed class TrackerFixture : IAsyncDisposable
+    {
+        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource done = new();
+        private readonly Func<string, ValueDictionary> respond;
+        private readonly bool keepAlive;
+        private readonly Task server;
+
+        internal TrackerFixture(Func<string, ValueDictionary> respond, bool keepAlive = false)
+        {
+            this.respond = respond;
+            this.keepAlive = keepAlive;
+            listener.Start();
+            Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            server = Task.Run(AcceptAsync);
+        }
+
+        internal int Port { get; }
+
+        /// <summary>Each request line followed by its header lines.</summary>
+        internal ConcurrentQueue<string> Requests { get; } = new();
+
+        private async Task AcceptAsync()
+        {
+            List<Task> connections = [];
+            try
+            {
+                while (true) connections.Add(ServeAsync(await listener.AcceptTcpClientAsync(done.Token)));
+            }
+            catch (OperationCanceledException) when (done.IsCancellationRequested) { }
+            catch (SocketException) when (done.IsCancellationRequested) { }
+            await Task.WhenAll(connections);
+        }
+
+        private async Task ServeAsync(TcpClient peer)
+        {
+            using (peer)
+            {
+                try
+                {
+                    NetworkStream stream = peer.GetStream();
+                    using StreamReader reader = new(stream, Encoding.Latin1, leaveOpen: true);
+                    do
+                    {
+                        if (await reader.ReadLineAsync(done.Token) is not { } line) return;
+                        StringBuilder request = new(line);
+                        while (await reader.ReadLineAsync(done.Token) is { Length: > 0 } header) request.Append('\n').Append(header);
+                        Requests.Enqueue(request.ToString());
+                        byte[] body = respond(line).Encode();
+                        string connection = keepAlive ? string.Empty : "Connection: close\r\n";
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n{connection}\r\n"), done.Token);
+                        await stream.WriteAsync(body, done.Token);
+                    }
+                    while (keepAlive);
+                }
+                catch (OperationCanceledException) when (done.IsCancellationRequested) { }
+                catch (IOException) { }
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            done.Cancel();
+            listener.Stop();
+            await server;
+            done.Dispose();
+        }
     }
 
     private static async Task<byte[]> Handshake(int port, byte[] hash)
@@ -606,7 +965,8 @@ internal static class EngineLifecycleSelfTest
             catch (OperationCanceledException) when (done.IsCancellationRequested) { }
             catch (SocketException) when (done.IsCancellationRequested) { }
         });
-        RatioEngine first = new(new Host { RequestScrape = true }, new ManualClock(), automaticTicks: false);
+        ManualClock firstClock = new();
+        RatioEngine first = new(new Host { RequestScrape = true }, firstClock, automaticTicks: false);
         RatioEngine second = new(new Host(), new ManualClock(), automaticTicks: false);
         RatioEngine broken = new(new Host(), new ManualClock(), automaticTicks: false);
         RatioEngine emptyRejection = new(new Host(), new ManualClock(), automaticTicks: false);
@@ -618,7 +978,8 @@ internal static class EngineLifecycleSelfTest
         {
             first.Start(Configuration(tracker: $"http://127.0.0.1:{port}/one%2Fraw//announce.php?pass=x%2Fy&empty=#ignored?bad=1"));
             await WaitStats(first, stats => !stats.IsAnnouncing && stats.Seeders == 4);
-            Require(first.IsRunning && first.GetStats().IntervalRemaining == 90, "The min_interval alias must control the announce deadline.");
+            Require(first.IsRunning && first.GetStats().IntervalRemaining == 300 && first.GetStats().ManualUpdateWait == 90,
+                "The min_interval alias must control manual updates, and libtorrent raises a 60-second interval to 300 seconds.");
             Require(firstAlerts.Any(alert => alert.Level == EngineAlert.Warning && alert.Message == warning), "A UTF-8 tracker warning must reach the owning tab without stopping it.");
             string[] initial = requests.ToArray();
             Require(initial.Length == 2, "Missing announce counts must trigger only the normal scrape fallback.");
@@ -630,6 +991,8 @@ internal static class EngineLifecycleSelfTest
             second.Start(Configuration(tracker: $"http://127.0.0.1:{port}/two//announce.php?#discarded"));
             await WaitStats(second, stats => !stats.IsAnnouncing && stats.Seeders == 4);
             Require(!requests.Last().Contains("trackerid=", StringComparison.Ordinal), "A tracker ID must never cross engine boundaries.");
+            Require(!await first.ManualUpdateAsync(), "A manual update before the tracker's min_interval must be refused.");
+            firstClock.Advance(90);
             Require(await first.ManualUpdateAsync(), "The first tab must accept its regular update.");
             string update = requests.Last();
             Require(update.Contains("&trackerid=opaque%26%00%2f%ff%2b%3f", StringComparison.Ordinal), "The tracker ID must preserve and encode all opaque bytes.");
@@ -663,9 +1026,9 @@ internal static class EngineLifecycleSelfTest
         }
     }
 
-    private static SessionConfig Configuration(long total = 10000, double finished = 100, int interval = 1800, int port = 43210, byte[]? hash = null, bool generatedKey = false, string? tracker = null) => new()
+    private static SessionConfig Configuration(long total = 10000, double finished = 100, int interval = 1800, int port = 43210, byte[]? hash = null, bool generatedKey = false, string? tracker = null, string peerId = "-qB5100-testpause001", ClientProfile? client = null) => new()
     {
-        Client = ClientCatalog.Create("qBittorrent", "5.1.0"),
+        Client = client ?? ClientCatalog.Create("qBittorrent", "5.1.0"),
         Proxy = new(),
         Tracker = tracker ?? "http://127.0.0.1:1/announce",
         HashHex = new string('0', 40),
@@ -676,15 +1039,15 @@ internal static class EngineLifecycleSelfTest
         Port = port.ToString(System.Globalization.CultureInfo.InvariantCulture),
         Key = "ABC12345",
         KeyIsGenerated = generatedKey,
-        PeerID = "-qB5100-testpause001",
+        PeerID = peerId,
         NumWant = "20",
     };
 
-    private static ValueDictionary Response(int interval = 1800, int minimum = 0, int? leechers = 1, int? seeders = 4)
+    private static ValueDictionary Response(int interval = 1800, int? minimum = 0, int? leechers = 1, int? seeders = 4)
     {
         ValueDictionary response = new();
         response.SetStringValue("interval", interval.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        response.SetStringValue("min interval", minimum.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (minimum is { } least) response.SetStringValue("min interval", least.ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (seeders is { } seeds) response.SetStringValue("complete", seeds.ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (leechers is { } peers) response.SetStringValue("incomplete", peers.ToString(System.Globalization.CultureInfo.InvariantCulture));
         return response;
@@ -727,6 +1090,7 @@ internal static class EngineLifecycleSelfTest
         public bool RandomDownloadEnabled => false;
         public string StopWhen { get; init; } = "Never";
         public string StopValue { get; init; } = string.Empty;
+        public StopConditionSettings StopCondition => new(SessionSettings.ParseStopCondition(StopWhen), StopValue);
         public void ApplyAlert(EngineAlert level, string message) { }
     }
 }

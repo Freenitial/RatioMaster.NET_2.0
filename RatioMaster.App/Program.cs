@@ -1,5 +1,7 @@
 using System;
+using System.Linq;
 using Avalonia;
+using RatioMaster.Localization;
 using RatioMaster.Services;
 
 namespace RatioMaster;
@@ -12,6 +14,8 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // The system language is read before the process switches its own formatting culture to invariant.
+        Language.CaptureSystemLanguage();
         AppLanguage.UseEnglishResources();
         if (Array.IndexOf(args, "--runtime-selftest") >= 0) return RuntimeSelfTest.Run();
 #if DEBUG
@@ -20,18 +24,29 @@ internal static class Program
         {
             return SelfTest.Run();
         }
+        if (Array.IndexOf(args, "--export-strings") is int export and >= 0 && export + 1 < args.Length)
+        {
+            return StringsExport.Run(args[export + 1]);
+        }
+        if (Array.IndexOf(args, "--write-request-goldens") is int goldens and >= 0 && goldens + 1 < args.Length)
+        {
+            return ProfileSelfTest.WriteGoldens(args[goldens + 1]);
+        }
 #endif
 
-        // One instance per user session. Launching again just surfaces the running window — which is the
-        // whole point, since closing the window only minimises the app to the tray, so "already running"
-        // normally means "running invisibly". Tabs cover the multi-torrent case, and a second process
-        // would clobber the shared session file.
+        // .torrent files and folders given on the command line (file association, "Open with", drag onto the icon).
+        string[] files = args.Where(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
+
+        // One instance per user session. Launching again surfaces the running window and hands it the files —
+        // tabs cover the multi-torrent case, and a second process would clobber the shared session file.
         if (!SingleInstance.TryAcquire())
         {
-            SingleInstance.SignalExistingInstance();
+            SingleInstance.SignalExistingInstance(files);
             return 0;
         }
 
+        SingleInstance.StartListener();
+        App.StartupFiles = files;
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 

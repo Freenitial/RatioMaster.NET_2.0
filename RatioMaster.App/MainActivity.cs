@@ -41,7 +41,8 @@ public class MainApplication : AvaloniaAndroidApplication<App>
     Icon = "@mipmap/icon",
     MainLauncher = true,
     EnableOnBackInvokedCallback = true,
-    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode)]
+    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode
+        | ConfigChanges.Locale | ConfigChanges.LayoutDirection)]
 public class MainActivity : AvaloniaMainActivity, ILocalNetworkPermission
 {
     private const int NotificationPermissionRequestCode = 1;
@@ -80,6 +81,19 @@ public class MainActivity : AvaloniaMainActivity, ILocalNetworkPermission
             OnBackInvokedDispatcher.RegisterOnBackInvokedCallback(
                 IOnBackInvokedDispatcher.PriorityDefault, backCallback);
         }
+    }
+
+    /// <summary>
+    /// A language chosen in the system settings (device language, or the per-app language of Android 13+)
+    /// applies at once, without recreating the view.
+    /// </summary>
+    public override void OnConfigurationChanged(Android.Content.Res.Configuration newConfig)
+    {
+        base.OnConfigurationChanged(newConfig);
+        string? applicationTag = null;
+        if (OperatingSystem.IsAndroidVersionAtLeast(33) && GetSystemService(LocaleService) is LocaleManager manager)
+            applicationTag = manager.ApplicationLocales.IsEmpty ? string.Empty : manager.ApplicationLocales.Get(0)?.ToLanguageTag();
+        RatioMaster.Localization.Language.FollowSystem(applicationTag);
     }
 
     [ObsoletedOSPlatform("android33.0")]

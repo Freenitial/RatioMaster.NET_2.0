@@ -1,0 +1,238 @@
+### qBittorrent 5.2.4
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5240--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.2.4\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5240--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.2.4\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/5.2.46:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/5.2.46:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 5.2.3
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5230--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.2.3\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5230--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.2.3\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/5.2.36:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/5.2.36:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 5.1.4
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5140--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.1.4\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5140--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.1.4\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/5.1.46:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/5.1.46:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 5.1.0
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5100--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.1.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5100--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.1.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/5.1.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/5.1.06:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 5.0.3
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5030--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.0.3\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB5030--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/5.0.3\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/5.0.36:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/5.0.36:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 4.6.7
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB4670--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/4.6.7\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB4670--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/4.6.7\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/4.6.76:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/4.6.76:yourip4:\xcb\x00q\x07e
+
+### qBittorrent 4.6.5
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB4650--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/4.6.5\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-qB4650--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: qBittorrent/4.6.5\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v17:qBittorrent/4.6.56:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v17:qBittorrent/4.6.56:yourip4:\xcb\x00q\x07e
+
+### uTorrent 3.6.0
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2a%28%29%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-UT360S-%96%b8%01-._~%21%ff%80%c1%d1&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: uTorrent/360(113358998)(47254)\r\n
+Accept-Encoding: gzip\r\n
+Connection: Close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2a%28%29%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-UT360S-%96%b8%01-._~%21%ff%80%c1%d1&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: uTorrent/360(113358998)(47254)\r\n
+Accept-Encoding: gzip\r\n
+Connection: Close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:ei0e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e1:pi6881e4:reqqi255e1:v15:\xc2\xb5Torrent 3.6.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:ei0e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4ee1:pi6881e4:reqqi255e1:v15:\xc2\xb5Torrent 3.6.06:yourip4:\xcb\x00q\x07e
+
+### Transmission 4.1.3
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2A%28%29%27%00%FFAz0%20%2B%25%26%3D%2F&peer_id=-TR4130-abcdefghij0z&port=6881&uploaded=1&downloaded=2&left=3&numwant=80&key=0A1B2C3D&compact=1&supportcrypto=1&event=started HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Transmission/4.1.3\r\n
+Accept: */*\r\n
+Accept-Encoding: deflate, gzip\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2A%28%29%27%00%FFAz0%20%2B%25%26%3D%2F&peer_id=-TR4130-abcdefghij0z&port=6881&uploaded=1&downloaded=2&left=3&numwant=0&key=0A1B2C3D&compact=1&supportcrypto=1&event=stopped&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Transmission/4.1.3\r\n
+Accept: */*\r\n
+Accept-Encoding: deflate, gzip\r\n
+\r\n
+reserved 0000000000100005
+ltep public d1:ei1e1:md11:ut_metadatai3e6:ut_pexi1ee13:metadata_sizei4321e1:pi6881e4:reqqi2000e11:upload_onlyi1e1:v18:Transmission 4.1.36:yourip4:\xcb\x00q\x07e
+ltep private d1:ei1e1:pi6881e4:reqqi2000e11:upload_onlyi0e1:v18:Transmission 4.1.36:yourip4:\xcb\x00q\x07e
+
+### Transmission 4.0.6
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2A%28%29%27%00%FFAz0%20%2B%25%26%3D%2F&peer_id=-TR4060-abcdefghij0z&port=6881&uploaded=1&downloaded=2&left=3&numwant=80&key=0A1B2C3D&compact=1&supportcrypto=1&event=started HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Transmission/4.0.6\r\n
+Accept: */*\r\n
+Accept-Encoding: deflate, gzip\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2A%28%29%27%00%FFAz0%20%2B%25%26%3D%2F&peer_id=-TR4060-abcdefghij0z&port=6881&uploaded=1&downloaded=2&left=3&numwant=0&key=0A1B2C3D&compact=1&supportcrypto=1&event=stopped&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Transmission/4.0.6\r\n
+Accept: */*\r\n
+Accept-Encoding: deflate, gzip\r\n
+\r\n
+reserved 0000000000100005
+ltep public d1:ei1e1:md11:ut_metadatai3e6:ut_pexi1ee13:metadata_sizei4321e1:pi6881e4:reqqi512e11:upload_onlyi1e1:v18:Transmission 4.0.66:yourip4:\xcb\x00q\x07e
+ltep private d1:ei1e1:pi6881e4:reqqi512e11:upload_onlyi0e1:v18:Transmission 4.0.66:yourip4:\xcb\x00q\x07e
+
+### Deluge 2.2.0
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE220s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.2.0 libtorrent/2.0.7.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE220s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.2.0 libtorrent/2.0.7.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v31:Deluge/2.2.0 libtorrent/2.0.7.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v31:Deluge/2.2.0 libtorrent/2.0.7.06:yourip4:\xcb\x00q\x07e
+
+### Deluge 2.2.0 (libtorrent 1.2.19)
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE220s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.2.0 libtorrent/1.2.19.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE220s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.2.0 libtorrent/1.2.19.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000180005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi500e11:upload_onlyi1e1:v32:Deluge/2.2.0 libtorrent/1.2.19.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi500e1:v32:Deluge/2.2.0 libtorrent/1.2.19.06:yourip4:\xcb\x00q\x07e
+
+### Deluge 2.1.1
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE211s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.1.1 libtorrent/2.0.6.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~!*()%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-DE211s--_.!~*()Ab9z&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&supportcrypto=1&redundant=0&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: Deluge/2.1.1 libtorrent/2.0.6.0\r\n
+Accept-Encoding: gzip\r\n
+Connection: close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e4:reqqi2000e11:upload_onlyi1e1:v31:Deluge/2.1.1 libtorrent/2.0.6.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:md11:lt_donthavei7e10:share_modei8e11:upload_onlyi3e12:ut_holepunchi4ee4:reqqi2000e1:v31:Deluge/2.1.1 libtorrent/2.0.6.06:yourip4:\xcb\x00q\x07e
+
+### BitTorrent 7.11.0 (47255)
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2a%28%29%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-BT7b0S-%97%b8%01-._~%21%ff%80k%f0&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=started&numwant=200&compact=1&no_peer_id=1 HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: BitTorrent/7110(258062487)(47255)\r\n
+Accept-Encoding: gzip\r\n
+Connection: Close\r\n
+\r\n
+GET /a%2Fb/announce.php?passkey=x%2Fy&info_hash=-._~%21%2a%28%29%27%00%ffAz0%20%2b%25%26%3d%2f&peer_id=-BT7b0S-%97%b8%01-._~%21%ff%80k%f0&port=6881&uploaded=1&downloaded=2&left=3&corrupt=0&key=0A1B2C3D&event=stopped&numwant=0&compact=1&no_peer_id=1&trackerid=opaque%26id HTTP/1.1\r\n
+Host: tracker.example:2710\r\n
+User-Agent: BitTorrent/7110(258062487)(47255)\r\n
+Accept-Encoding: gzip\r\n
+Connection: Close\r\n
+\r\n
+reserved 0000000000100005
+ltep public d12:complete_agoi0e1:ei0e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei4321e1:pi6881e4:reqqi255e1:v17:BitTorrent 7.11.06:yourip4:\xcb\x00q\x07e
+ltep private d12:complete_agoi-1e1:ei0e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4ee1:pi6881e4:reqqi255e1:v17:BitTorrent 7.11.06:yourip4:\xcb\x00q\x07e
+

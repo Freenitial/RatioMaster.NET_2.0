@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using RatioMaster.BitTorrent;
+using RatioMaster.Localization;
 
 /// <summary>Decodes a framed HTTP response and accepts only one complete bencoded dictionary.</summary>
 internal sealed class TrackerResponse
@@ -38,7 +39,7 @@ internal sealed class TrackerResponse
             if (message.Fields.TryGetValue("Content-Encoding", out string? contentEncoding) && body.Length > 0)
             {
                 string[] encodings = contentEncoding.Split(',');
-                if (encodings.Length > 4) throw new InvalidDataException("Too many HTTP content encoding layers.");
+                if (encodings.Length > 4) throw new InvalidDataException(Strings.HttpTooManyContentEncodings);
                 for (int i = encodings.Length - 1; i >= 0; i--)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -55,12 +56,12 @@ internal sealed class TrackerResponse
         catch (BodyLimitException)
         {
             Oversized = true;
-            Error = "Tracker response exceeds the 8 MiB decoded body limit.";
+            Error = Strings.HttpDecodedBodyTooLarge;
             Dict = null;
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or TorrentException or OverflowException or FormatException)
         {
-            Error = "Invalid tracker response: " + ex.Message;
+            Error = Strings.HttpInvalidResponse(ex.Message);
             Dict = null;
         }
     }
@@ -77,7 +78,7 @@ internal sealed class TrackerResponse
         if (encoding is "gzip" or "x-gzip") return DecodeGzip(data, ct);
         if (encoding == "br") return DecodeBrotli(data, ct);
         if (encoding is not ("deflate" or "x-deflate"))
-            throw new InvalidDataException("Unsupported HTTP content encoding: " + encoding);
+            throw new InvalidDataException(Strings.HttpUnsupportedContentEncoding(encoding));
         bool zlib = data.Length >= 2 && (data[0] & 15) == 8 && ((data[0] << 8) + data[1]) % 31 == 0;
         using StrictInput input = new(data);
         using Stream decoder = zlib
@@ -85,7 +86,7 @@ internal sealed class TrackerResponse
             : new DeflateStream(input, CompressionMode.Decompress, leaveOpen: true);
         using MemoryStream output = new();
         CopyDecoded(decoder, output, ct);
-        if (input.Position != input.Length) throw new InvalidDataException("Trailing bytes after the deflate stream.");
+        if (input.Position != input.Length) throw new InvalidDataException(Strings.HttpTrailingBytesAfterDeflateStream);
         return output.ToArray();
     }
 
@@ -97,13 +98,13 @@ internal sealed class TrackerResponse
         do
         {
             ct.ThrowIfCancellationRequested();
-            if (++members > 32) throw new InvalidDataException("Too many gzip members.");
+            if (++members > 32) throw new InvalidDataException(Strings.HttpTooManyGzipMembers);
             int start = (int)input.Position;
             int position = start;
             RequireBytes(data, position, 10);
             if (data[position] != 0x1F || data[position + 1] != 0x8B || data[position + 2] != 8
                 || (data[position + 3] & 0xE0) != 0)
-                throw new InvalidDataException("Invalid gzip header.");
+                throw new InvalidDataException(Strings.HttpInvalidGzipHeader);
             byte flags = data[position + 3];
             position += 10;
             if ((flags & 4) != 0)
@@ -121,7 +122,7 @@ internal sealed class TrackerResponse
                 RequireBytes(data, position, 2);
                 uint crc = Crc32(data.AsSpan(start, position - start));
                 if ((ushort)crc != BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(position, 2)))
-                    throw new InvalidDataException("Invalid gzip header checksum.");
+                    throw new InvalidDataException(Strings.HttpInvalidGzipHeaderChecksum);
                 position += 2;
             }
             input.Position = position;
@@ -135,7 +136,7 @@ internal sealed class TrackerResponse
             int memberLength = (int)(output.Length - memberStart);
             if (expectedLength != memberLength
                 || expectedCrc != Crc32(output.GetBuffer().AsSpan((int)memberStart, memberLength)))
-                throw new InvalidDataException("Invalid gzip body checksum or length.");
+                throw new InvalidDataException(Strings.HttpInvalidGzipBodyChecksumLength);
             input.Position = position + 8;
         }
         while (input.Position < input.Length);
@@ -158,12 +159,12 @@ internal sealed class TrackerResponse
                 WriteBounded(output, buffer.AsSpan(0, written));
                 if (status == OperationStatus.Done)
                 {
-                    if (position != data.Length) throw new InvalidDataException("Trailing bytes after the Brotli stream.");
+                    if (position != data.Length) throw new InvalidDataException(Strings.HttpTrailingBytesAfterBrotliStream);
                     return output.ToArray();
                 }
                 if (status == OperationStatus.InvalidData || status == OperationStatus.NeedMoreData
                     || (consumed == 0 && written == 0))
-                    throw new InvalidDataException("Invalid or truncated Brotli stream.");
+                    throw new InvalidDataException(Strings.HttpInvalidTruncatedBrotliStream);
             }
         }
         finally { decoder.Dispose(); }
@@ -189,13 +190,13 @@ internal sealed class TrackerResponse
 
     private static void RequireBytes(byte[] data, int offset, int count)
     {
-        if (offset < 0 || count > data.Length - offset) throw new InvalidDataException("Truncated gzip stream.");
+        if (offset < 0 || count > data.Length - offset) throw new InvalidDataException(Strings.HttpTruncatedGzipStream);
     }
 
     private static void SkipGzipString(byte[] data, ref int position)
     {
         int end = Array.IndexOf(data, (byte)0, position);
-        if (end < 0) throw new InvalidDataException("Unterminated gzip header field.");
+        if (end < 0) throw new InvalidDataException(Strings.HttpUnterminatedGzipHeaderField);
         position = end + 1;
     }
 
@@ -225,13 +226,13 @@ internal sealed class TrackerResponse
     {
         public override int Read(byte[] buffer, int offset, int count)
         {
-            if (count != 0 && Position == Length) throw new InvalidDataException("Truncated compressed response.");
+            if (count != 0 && Position == Length) throw new InvalidDataException(Strings.HttpTruncatedCompressedResponse);
             return base.Read(buffer, offset, count);
         }
 
         public override int Read(Span<byte> buffer)
         {
-            if (buffer.Length != 0 && Position == Length) throw new InvalidDataException("Truncated compressed response.");
+            if (buffer.Length != 0 && Position == Length) throw new InvalidDataException(Strings.HttpTruncatedCompressedResponse);
             return base.Read(buffer);
         }
     }

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using RatioMaster.Localization;
 
 /// <summary>
 /// BEP 3 and BEP 52 metainfo validation. Sizes fit signed engine counters and piece indexes fit Int32.
@@ -26,34 +27,40 @@ internal sealed class TorrentMetainfo
     internal string Name { get; private init; } = string.Empty;
     internal string Announce { get; private init; } = string.Empty;
 
+    /// <summary>BEP 27: peers learnt outside the tracker (DHT, PEX, metadata exchange) are not used.</summary>
+    internal bool IsPrivate { get; private init; }
+
+    /// <summary>The exact bencoded info dictionary: the metadata a client serves to peers (BEP 9).</summary>
+    internal ReadOnlyMemory<byte> InfoBytes { get; private init; }
+
     private sealed record FileEntry(string Path, ulong Length, bool Padding, byte[]? Root = null);
 
     internal static TorrentMetainfo Read(Stream stream)
     {
-        ValueDictionary root = TorrentBencodeReader.Read(stream, out byte[] sha1, out byte[] sha256);
+        ValueDictionary root = TorrentBencodeReader.Read(stream, out byte[] sha1, out byte[] sha256, out byte[] infoBytes);
         ValueDictionary info = Required<ValueDictionary>(root, "info");
         ValueString rawName = Required<ValueString>(info, "name");
         string name = PathComponent(rawName.Bytes);
         ulong pieceLength = Nonnegative(info, "piece length");
         if (pieceLength == 0)
         {
-            throw Error("Piece length must be positive.");
+            throw Error(Strings.TorrentPieceLengthPositive);
         }
 
         bool isV2 = info.Contains("meta version");
         if (isV2 && Nonnegative(info, "meta version") != 2)
         {
-            throw Error("Unsupported metainfo version.");
+            throw Error(Strings.TorrentUnsupportedMetainfoVersion);
         }
 
         if (!isV2 && (info.Contains("file tree") || root.Contains("piece layers")))
         {
-            throw Error("V2 structures require meta version 2.");
+            throw Error(Strings.TorrentV2StructuresRequireMetaVersion);
         }
 
         if (isV2 && (pieceLength < 16384 || (pieceLength & (pieceLength - 1)) != 0))
         {
-            throw Error("V2 piece length must be a power of two of at least 16 KiB.");
+            throw Error(Strings.TorrentV2PieceLengthPowerTwo);
         }
 
         bool hasV1 = !isV2 || info.Contains("pieces") || info.Contains("length") || info.Contains("files");
@@ -70,7 +77,7 @@ internal sealed class TorrentMetainfo
             ulong expected = PiecesFor(v1Length, pieceLength);
             if (pieces.Length % 20 != 0 || (ulong)(pieces.Length / 20) != expected)
             {
-                throw Error("V1 pieces must contain exactly one 20-byte hash per piece of the file layout.");
+                throw Error(Strings.TorrentV1PiecesLength);
             }
 
             v1Pieces = PieceIndexCount(expected);
@@ -83,7 +90,7 @@ internal sealed class TorrentMetainfo
             ReadV2Tree(tree, string.Empty, 0, v2Files, ref pathBytes);
             if (v2Files.Count == 0)
             {
-                throw Error("The file tree must contain at least one file.");
+                throw Error(Strings.TorrentFileTreeContainLeastFile);
             }
 
             ulong count = 0;
@@ -99,7 +106,7 @@ internal sealed class TorrentMetainfo
                     int pieces = PieceIndexCount(PiecesFor(file.Length, pieceLength));
                     if (expectedLayers.TryGetValue(key, out int prior) && prior != pieces)
                     {
-                        throw Error("Files sharing a pieces root require incompatible piece layer sizes.");
+                        throw Error(Strings.TorrentFilesSharingPiecesRootRequire);
                     }
 
                     expectedLayers[key] = pieces;
@@ -113,7 +120,7 @@ internal sealed class TorrentMetainfo
                 ValidateHybrid(v1Files, v2Files, pieceLength);
                 if (v1Pieces != v2Pieces)
                 {
-                    throw Error("Hybrid piece index spaces do not agree.");
+                    throw Error(Strings.TorrentHybridPieceCountMismatch);
                 }
             }
         }
@@ -129,6 +136,8 @@ internal sealed class TorrentMetainfo
             IsHybrid = isV2 && hasV1,
             Name = name,
             Announce = ReadAnnounce(root),
+            IsPrivate = info.Contains("private") && info["private"] is ValueNumber flag && flag.Integer == 1,
+            InfoBytes = infoBytes,
         };
     }
 
@@ -136,7 +145,7 @@ internal sealed class TorrentMetainfo
     {
         if (info.Contains("length") == info.Contains("files"))
         {
-            throw Error("V1 info must contain exactly one of length and files.");
+            throw Error(Strings.TorrentV1InfoContainExactlyLength);
         }
 
         total = 0;
@@ -146,7 +155,7 @@ internal sealed class TorrentMetainfo
             bool padding = ReadAttributes(info);
             if (padding)
             {
-                throw Error("A single-file torrent cannot consist of a padding file.");
+                throw Error(Strings.TorrentSingleFileIsPadding);
             }
 
             total = Nonnegative(info, "length");
@@ -161,7 +170,7 @@ internal sealed class TorrentMetainfo
         {
             if (value is not ValueDictionary file)
             {
-                throw Error("Each v1 files entry must be a dictionary.");
+                throw Error(Strings.TorrentV1FilesEntryDictionary);
             }
 
             ulong length = Nonnegative(file, "length");
@@ -172,7 +181,7 @@ internal sealed class TorrentMetainfo
             {
                 if (length == 0)
                 {
-                    throw Error("Padding files must have a positive length.");
+                    throw Error(Strings.TorrentPaddingFilesHavePositiveLength);
                 }
 
             }
@@ -187,7 +196,7 @@ internal sealed class TorrentMetainfo
 
         if (payloadFiles == 0)
         {
-            throw Error("The v1 files list must contain a payload file.");
+            throw Error(Strings.TorrentV1FilesListContainPayload);
         }
 
         // A terminal separator sorts every ancestor immediately before its descendants.
@@ -206,7 +215,7 @@ internal sealed class TorrentMetainfo
                 || (sorted[index].Key.Length > sorted[index - 1].Key.Length
                     && sorted[index].Key.StartsWith(sorted[index - 1].Key, StringComparison.Ordinal)))
             {
-                throw Error("Duplicate or conflicting v1 file paths.");
+                throw Error(Strings.TorrentDuplicateConflictingV1FilePaths);
             }
         }
 
@@ -218,20 +227,20 @@ internal sealed class TorrentMetainfo
     {
         if (depth > TorrentBencodeReader.MaxDepth || tree.Keys.Count == 0)
         {
-            throw Error("Invalid or excessively nested file tree.");
+            throw Error(Strings.TorrentInvalidExcessivelyNestedFileTree);
         }
 
         if (tree.Contains(string.Empty))
         {
             if (path.Length == 0 || tree.Keys.Count != 1)
             {
-                throw Error("A file tree leaf needs a filename and cannot also contain children.");
+                throw Error(Strings.TorrentFileTreeLeafNeedsFilename);
             }
 
             ValueDictionary properties = Required<ValueDictionary>(tree, string.Empty);
             if (ReadAttributes(properties))
             {
-                throw Error("V2 file trees cannot contain padding files.");
+                throw Error(Strings.TorrentV2PaddingFile);
             }
 
             ulong length = Nonnegative(properties, "length");
@@ -240,7 +249,7 @@ internal sealed class TorrentMetainfo
             {
                 if (properties.Contains("pieces root"))
                 {
-                    throw Error("Empty v2 files must omit pieces root.");
+                    throw Error(Strings.TorrentEmptyV2FilesOmitPieces);
                 }
             }
             else
@@ -248,7 +257,7 @@ internal sealed class TorrentMetainfo
                 piecesRoot = Required<ValueString>(properties, "pieces root").Bytes;
                 if (piecesRoot.Length != 32)
                 {
-                    throw Error("V2 pieces root must contain 32 bytes.");
+                    throw Error(Strings.TorrentV2PiecesRootLength);
                 }
             }
 
@@ -270,7 +279,7 @@ internal sealed class TorrentMetainfo
             string childPath = path.Length == 0 ? key : path + "/" + key;
             if (childPath.Length > MaxPathBytes)
             {
-                throw Error("File path exceeds the 4096-byte limit.");
+                throw Error(Strings.TorrentFilePathTooLong);
             }
 
             ReadV2Tree(Required<ValueDictionary>(tree, key), childPath, depth + 1, files, ref pathBytes);
@@ -288,19 +297,19 @@ internal sealed class TorrentMetainfo
                 ulong remainder = offset % pieceLength;
                 if (remainder == 0 || file.Length != pieceLength - remainder)
                 {
-                    throw Error("Hybrid padding must fill exactly the remainder of a piece.");
+                    throw Error(Strings.TorrentHybridPaddingFillExactlyRemainder);
                 }
             }
             else
             {
                 if (index == v2.Count || file.Path != v2[index].Path || file.Length != v2[index].Length)
                 {
-                    throw Error("Hybrid file paths, lengths and order must agree between v1 and v2.");
+                    throw Error(Strings.TorrentHybridFilePathsLengthsOrder);
                 }
 
                 if (file.Length != 0 && offset % pieceLength != 0)
                 {
-                    throw Error("Each nonempty hybrid file must begin at a piece boundary.");
+                    throw Error(Strings.TorrentNonemptyHybridFileBeginPiece);
                 }
 
                 index++;
@@ -311,7 +320,7 @@ internal sealed class TorrentMetainfo
 
         if (index != v2.Count)
         {
-            throw Error("Hybrid v1 description is missing v2 files.");
+            throw Error(Strings.TorrentHybridV1DescriptionMissingV2);
         }
     }
 
@@ -321,7 +330,7 @@ internal sealed class TorrentMetainfo
         {
             if (expected.Count != 0)
             {
-                throw Error("Required v2 piece layers are missing.");
+                throw Error(Strings.TorrentRequiredV2PieceLayersMissing);
             }
 
             return;
@@ -330,26 +339,26 @@ internal sealed class TorrentMetainfo
         ValueDictionary layers = Required<ValueDictionary>(root, "piece layers");
         if (layers.Keys.Count != expected.Count)
         {
-            throw Error("Piece layers must match exactly the files larger than one piece.");
+            throw Error(Strings.TorrentPieceLayersMatchExactlyFiles);
         }
 
         foreach (string key in layers.Keys)
         {
             if (key.Length != 32 || !expected.TryGetValue(key, out int pieces))
             {
-                throw Error("Piece layer has an unreferenced or invalid root key.");
+                throw Error(Strings.TorrentPieceLayerHasUnreferencedInvalid);
             }
 
             byte[] hashes = Required<ValueString>(layers, key).Bytes;
             if (hashes.Length % 32 != 0 || hashes.Length / 32 != pieces)
             {
-                throw Error("Piece layer must contain exactly one 32-byte hash per file piece.");
+                throw Error(Strings.TorrentPieceLayerLength);
             }
 
             if (!TorrentMerkle.ComputeRoot(hashes, pieceLength).AsSpan()
                 .SequenceEqual(Encoding.Latin1.GetBytes(key)))
             {
-                throw Error("Piece layer Merkle root does not match the file's pieces root.");
+                throw Error(Strings.TorrentPieceLayerRootMismatch);
             }
         }
     }
@@ -359,14 +368,14 @@ internal sealed class TorrentMetainfo
         string attributes = file.Contains("attr") ? Required<ValueString>(file, "attr").String : string.Empty;
         if (attributes.Contains('l') || file.Contains("symlink path"))
         {
-            throw Error("Symbolic-link file entries are not supported.");
+            throw Error(Strings.TorrentSymlinksUnsupported);
         }
 
         foreach (char attribute in attributes)
         {
             if (attribute < 'a' || attribute > 'z')
             {
-                throw Error("File attributes must be ASCII letters.");
+                throw Error(Strings.TorrentFileAttributesNotLetters);
             }
         }
 
@@ -377,7 +386,7 @@ internal sealed class TorrentMetainfo
     {
         if (components.values.Count == 0)
         {
-            throw Error("File paths must contain at least one component.");
+            throw Error(Strings.TorrentFilePathsContainLeastComponent);
         }
 
         StringBuilder path = new();
@@ -385,7 +394,7 @@ internal sealed class TorrentMetainfo
         {
             if (component is not ValueString text)
             {
-                throw Error("File path components must be strings.");
+                throw Error(Strings.TorrentFilePathComponentsStrings);
             }
 
             PathComponent(text.Bytes);
@@ -396,7 +405,7 @@ internal sealed class TorrentMetainfo
 
             if (text.Length > MaxPathBytes - path.Length)
             {
-                throw Error("File path exceeds the 4096-byte limit.");
+                throw Error(Strings.TorrentFilePathTooLong);
             }
 
             path.Append(text.String);
@@ -409,13 +418,13 @@ internal sealed class TorrentMetainfo
     {
         if (bytes.Length == 0 || bytes.Length > MaxPathBytes)
         {
-            throw Error("File names must contain between 1 and 4096 UTF-8 bytes.");
+            throw Error(Strings.TorrentFileNameLength);
         }
 
         string name = DecodeUtf8(bytes);
         if (name is "." or ".." || name.IndexOfAny(['/', '\\', '\0']) >= 0)
         {
-            throw Error("File names must be individual path components without traversal or NUL bytes.");
+            throw Error(Strings.TorrentFileNamesIndividualPathComponents);
         }
 
         return name;
@@ -425,7 +434,7 @@ internal sealed class TorrentMetainfo
     {
         if (path.Length > MaxPathBytes || path.Length > MaxTotalPathBytes - used)
         {
-            throw Error("Torrent paths exceed the path memory limit.");
+            throw Error(Strings.TorrentPathsTooLarge);
         }
 
         used += path.Length;
@@ -441,20 +450,20 @@ internal sealed class TorrentMetainfo
             {
                 if (value is not ValueList tier || tier.values.Count == 0)
                 {
-                    throw Error("Announce-list tiers must be nonempty lists.");
+                    throw Error(Strings.TorrentAnnounceListTiersNonemptyLists);
                 }
 
                 foreach (IBEncodeValue entry in tier)
                 {
                     if (entry is not ValueString url)
                     {
-                        throw Error("Announce-list URLs must be strings.");
+                        throw Error(Strings.TorrentAnnounceListUrlsStrings);
                     }
 
                     string decoded = DecodeUtf8(url.Bytes);
                     if (decoded.Length == 0)
                     {
-                        throw Error("Announce-list URLs must not be empty.");
+                        throw Error(Strings.TorrentAnnounceListUrlsEmpty);
                     }
 
                     if (announce.Length == 0)
@@ -476,7 +485,7 @@ internal sealed class TorrentMetainfo
         }
         catch (DecoderFallbackException)
         {
-            throw Error("Torrent text must be valid UTF-8.");
+            throw Error(Strings.TorrentTextNotUtf8);
         }
     }
 
@@ -484,7 +493,7 @@ internal sealed class TorrentMetainfo
     {
         if (!dictionary.Contains(key) || dictionary[key] is not T value)
         {
-            throw Error("Missing or incorrectly typed metainfo field: " + key);
+            throw Error(Strings.TorrentMissingField(key));
         }
 
         return value;
@@ -496,7 +505,7 @@ internal sealed class TorrentMetainfo
         long value = long.Parse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
         if (value < 0)
         {
-            throw Error("Metainfo sizes and versions must not be negative: " + key);
+            throw Error(Strings.TorrentNegativeField(key));
         }
 
         return (ulong)value;
@@ -506,7 +515,7 @@ internal sealed class TorrentMetainfo
     {
         if (length > (ulong)long.MaxValue - total)
         {
-            throw Error("Total torrent length exceeds the engine's signed 64-bit size limit.");
+            throw Error(Strings.TorrentLengthTooLarge);
         }
 
         return total + length;
@@ -519,7 +528,7 @@ internal sealed class TorrentMetainfo
     {
         if (count > int.MaxValue - 7)
         {
-            throw Error("Piece count exceeds the supported wire bitfield index range.");
+            throw Error(Strings.TorrentPieceCountExceedsSupportedWire);
         }
 
         return (int)count;

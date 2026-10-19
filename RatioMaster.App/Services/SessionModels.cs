@@ -14,7 +14,20 @@ internal enum CloseBehavior
 /// <summary>Persistable state of the whole app (portable settings + resume).</summary>
 internal sealed class SessionData
 {
-    public int FormatVersion { get; set; } = 2;
+    /// <summary>3: Port/Peers empty = automatic, per-client ports, exact progress, Downloaded excludes pre-existing data.</summary>
+    internal const int CurrentFormatVersion = 3;
+
+    public int FormatVersion { get; set; } = CurrentFormatVersion;
+
+    /// <summary>The version the file was written with; migrations depend on it.</summary>
+    [JsonIgnore]
+    public int LoadedFormatVersion { get; set; } = CurrentFormatVersion;
+
+    /// <summary>Interface language code, or empty to follow the system.</summary>
+    public string Language { get; set; } = string.Empty;
+
+    /// <summary>The listening port of each client profile per network exit ("profile|route").</summary>
+    public Dictionary<string, int> ClientPorts { get; set; } = [];
 
     public WindowPlacement? Window { get; set; }
 
@@ -121,7 +134,20 @@ internal sealed class TabState
     // Resume counters (cumulative bytes at last save).
     public long Uploaded { get; set; }
 
+    /// <summary>Bytes this program downloaded (format 3); earlier formats stored the bytes present here.</summary>
     public long Downloaded { get; set; }
+
+    /// <summary>Exact bytes present when saved, or -1 when unknown.</summary>
+    public long Have { get; set; } = -1;
+
+    /// <summary>The Finished (%) text written from <see cref="Have"/>; an edited percentage no longer matches it.</summary>
+    public string ProgressFinished { get; set; } = string.Empty;
+
+    /// <summary>The Finished (%) the user typed, which another torrent in this tab starts from.</summary>
+    public string FinishedChoice { get; set; } = string.Empty;
+
+    /// <summary>Counters still in the pre-format-3 meaning: the torrent was missing when they were migrated.</summary>
+    public bool LegacyCounters { get; set; }
 }
 
 internal sealed class WindowPlacement

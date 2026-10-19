@@ -2,6 +2,7 @@ namespace RatioMaster.Engine;
 
 using System.Globalization;
 using System.Text;
+using RatioMaster.Localization;
 
 /// <summary>Reads one complete HTTP/1.x message with bounded headers, body and chunk framing.</summary>
 internal static class HttpResponseReader
@@ -22,13 +23,13 @@ internal static class HttpResponseReader
         bool hasLength = head.Fields.TryGetValue("Content-Length", out string? lengthText);
         bool hasTransfer = head.Fields.TryGetValue("Transfer-Encoding", out string? transfer);
         if (hasTransfer && hasLength)
-            throw new IOException("Tracker response contains both Transfer-Encoding and Content-Length.");
+            throw new IOException(Strings.HttpTrackerResponseContainsBothTransfer);
 
         byte[] body;
         if (hasTransfer)
         {
             if (!string.Equals(transfer, "chunked", StringComparison.OrdinalIgnoreCase))
-                throw new IOException("Unsupported HTTP transfer coding: " + transfer);
+                throw new IOException(Strings.HttpUnsupportedTransferCoding(transfer ?? string.Empty));
             body = await ReadChunksAsync(reader, ct).ConfigureAwait(false);
         }
         else if (hasLength)
@@ -38,11 +39,11 @@ internal static class HttpResponseReader
             {
                 if (!long.TryParse(part.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out long value)
                     || value < 0 || (contentLength.HasValue && contentLength.Value != value))
-                    throw new IOException("Invalid or conflicting HTTP Content-Length.");
+                    throw new IOException(Strings.HttpInvalidContentLength);
                 contentLength = value;
             }
             if (!contentLength.HasValue || contentLength > reader.Remaining)
-                throw new IOException("Tracker response exceeds the 8 MiB receive limit.");
+                throw new IOException(Strings.HttpResponseTooLarge);
             body = new byte[(int)contentLength.Value];
             await reader.ReadExactlyAsync(body, ct).ConfigureAwait(false);
         }
@@ -79,22 +80,22 @@ internal static class HttpResponseReader
                 if (fields.TryGetValue(name, out string? old))
                 {
                     if (name.Equals("Location", StringComparison.OrdinalIgnoreCase))
-                        throw new IOException("Tracker response contains multiple redirect locations.");
+                        throw new IOException(Strings.HttpTrackerResponseContainsMultipleRedirect);
                     fields[name] = old + ", " + value;
                 }
                 else fields.Add(name, value);
                 text.Append("\r\n").Append(line);
             }
-            if (status == 101) throw new IOException("HTTP protocol switching is not supported for tracker requests.");
+            if (status == 101) throw new IOException(Strings.HttpProtocolSwitchingUnsupported);
             if (status >= 200) return new(text.ToString(), status, fields, []);
         }
-        throw new IOException("Too many informational HTTP responses.");
+        throw new IOException(Strings.HttpTooManyInformationalResponses);
     }
 
     private static async Task<string> ReadHeaderLineAsync(WireReader reader, int initialRemaining, int limit, CancellationToken ct)
     {
         int allowed = limit - (initialRemaining - reader.Remaining);
-        if (allowed < 2) throw new IOException("HTTP response headers exceed their size limit.");
+        if (allowed < 2) throw new IOException(Strings.HttpResponseHeadersExceedSize);
         return await reader.ReadLineAsync(Math.Min(MaxLineBytes, allowed), ct).ConfigureAwait(false);
     }
 
@@ -105,7 +106,7 @@ internal static class HttpResponseReader
             || (line.Length > 12 && line[12] != ' ')
             || !int.TryParse(line.AsSpan(9, 3), NumberStyles.None, CultureInfo.InvariantCulture, out int status)
             || status is < 100 or > 599 || line.Any(c => c < 32 && c != '\t'))
-            throw new IOException("Invalid HTTP response status line.");
+            throw new IOException(Strings.HttpInvalidResponseStatusLine);
         return status;
     }
 
@@ -114,7 +115,7 @@ internal static class HttpResponseReader
         int colon = line.IndexOf(':');
         if (colon <= 0 || !line.AsSpan(0, colon).ToArray().All(IsToken)
             || line.AsSpan(colon + 1).ToArray().Any(c => (c < 32 && c != '\t') || c == 127))
-            throw new IOException("Invalid HTTP response header field.");
+            throw new IOException(Strings.HttpInvalidResponseHeaderField);
         return (line[..colon], line[(colon + 1)..].Trim(' ', '\t'));
     }
 
@@ -131,7 +132,7 @@ internal static class HttpResponseReader
             string size = extension < 0 ? line : line[..extension];
             if (size.Length == 0 || size.Any(c => !char.IsAsciiHexDigit(c))
                 || !ulong.TryParse(size, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ulong length))
-                throw new IOException("Invalid HTTP chunk size.");
+                throw new IOException(Strings.HttpInvalidChunkSize);
             if (extension >= 0) ValidateChunkExtensions(line.AsSpan(extension));
             if (length == 0)
             {
@@ -139,18 +140,18 @@ internal static class HttpResponseReader
                 while (true)
                 {
                     int allowed = 16 * 1024 - (before - reader.Remaining);
-                    if (allowed < 2) throw new IOException("HTTP chunk trailers exceed their size limit.");
+                    if (allowed < 2) throw new IOException(Strings.HttpChunkTrailersExceedSize);
                     string trailer = await reader.ReadLineAsync(Math.Min(MaxLineBytes, allowed), ct).ConfigureAwait(false);
                     if (trailer.Length == 0) return output.ToArray();
                     (string name, _) = ParseField(trailer);
                     if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)
                         || name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)
                         || name.Equals("Content-Encoding", StringComparison.OrdinalIgnoreCase))
-                        throw new IOException("HTTP trailer attempts to change response framing or encoding.");
+                        throw new IOException(Strings.HttpTrailerAttemptsChangeResponse);
                 }
             }
             if (length > (ulong)reader.Remaining || length > (ulong)(TrackerResponse.MaxBodyBytes - output.Length))
-                throw new IOException("Tracker response exceeds the 8 MiB receive limit.");
+                throw new IOException(Strings.HttpResponseTooLarge);
             int remaining = (int)length;
             while (remaining > 0)
             {
@@ -161,7 +162,7 @@ internal static class HttpResponseReader
             }
             if (await reader.ReadByteAsync(ct).ConfigureAwait(false) != '\r'
                 || await reader.ReadByteAsync(ct).ConfigureAwait(false) != '\n')
-                throw new IOException("HTTP chunk data is missing its CRLF terminator.");
+                throw new IOException(Strings.HttpChunkDataMissingCrlf);
         }
     }
 
@@ -171,11 +172,11 @@ internal static class HttpResponseReader
         while (i < value.Length)
         {
             while (i < value.Length && value[i] is ' ' or '\t') i++;
-            if (i == value.Length || value[i++] != ';') throw new IOException("Invalid HTTP chunk extension.");
+            if (i == value.Length || value[i++] != ';') throw new IOException(Strings.HttpInvalidChunkExtension);
             while (i < value.Length && value[i] is ' ' or '\t') i++;
             int start = i;
             while (i < value.Length && IsToken(value[i])) i++;
-            if (i == start) throw new IOException("Invalid HTTP chunk extension name.");
+            if (i == start) throw new IOException(Strings.HttpInvalidChunkExtensionName);
             while (i < value.Length && value[i] is ' ' or '\t') i++;
             if (i < value.Length && value[i] == '=')
             {
@@ -194,15 +195,15 @@ internal static class HttpResponseReader
                             if (i == value.Length) break;
                             c = value[i++];
                         }
-                        if ((c < 32 && c != '\t') || c == 127) throw new IOException("Invalid HTTP chunk extension value.");
+                        if ((c < 32 && c != '\t') || c == 127) throw new IOException(Strings.HttpInvalidChunkExtensionValue);
                     }
-                    if (!closed) throw new IOException("Unterminated HTTP chunk extension value.");
+                    if (!closed) throw new IOException(Strings.HttpUnterminatedChunkExtensionValue);
                 }
                 else
                 {
                     start = i;
                     while (i < value.Length && IsToken(value[i])) i++;
-                    if (i == start) throw new IOException("Invalid HTTP chunk extension value.");
+                    if (i == start) throw new IOException(Strings.HttpInvalidChunkExtensionValue);
                 }
             }
         }
@@ -226,7 +227,7 @@ internal static class HttpResponseReader
                 if (end == 0) return 0;
             }
             int count = Math.Min(destination.Length, end - start);
-            if (count > Remaining) throw new IOException("HTTP response exceeds its receive limit.");
+            if (count > Remaining) throw new IOException(Strings.HttpResponseExceedsReceiveLimit);
             buffer.AsMemory(start, count).CopyTo(destination);
             start += count;
             Remaining -= count;
@@ -240,9 +241,9 @@ internal static class HttpResponseReader
             {
                 end = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, Remaining + 1)), ct).ConfigureAwait(false);
                 start = 0;
-                if (end == 0) throw new EndOfStreamException("Truncated HTTP response.");
+                if (end == 0) throw new EndOfStreamException(Strings.HttpTruncatedResponse);
             }
-            if (Remaining == 0) throw new IOException("HTTP response exceeds its receive limit.");
+            if (Remaining == 0) throw new IOException(Strings.HttpResponseExceedsReceiveLimit);
             Remaining--;
             return buffer[start++];
         }
@@ -253,7 +254,7 @@ internal static class HttpResponseReader
             while (position < destination.Length)
             {
                 int count = await ReadAsync(destination[position..], ct).ConfigureAwait(false);
-                if (count == 0) throw new EndOfStreamException("Truncated HTTP response body.");
+                if (count == 0) throw new EndOfStreamException(Strings.HttpTruncatedResponseBody);
                 position += count;
             }
         }
@@ -267,13 +268,13 @@ internal static class HttpResponseReader
                 if (value == '\r')
                 {
                     if (await ReadByteAsync(ct).ConfigureAwait(false) != '\n')
-                        throw new IOException("Invalid HTTP line terminator.");
+                        throw new IOException(Strings.HttpInvalidLineTerminator);
                     return Encoding.Latin1.GetString(line.GetBuffer(), 0, (int)line.Length);
                 }
-                if (value == '\n') throw new IOException("HTTP lines must end with CRLF.");
+                if (value == '\n') throw new IOException(Strings.HttpLinesEndCrlf);
                 line.WriteByte((byte)value);
             }
-            throw new IOException("HTTP response line exceeds its size limit.");
+            throw new IOException(Strings.HttpResponseLineExceedsSize);
         }
     }
 }

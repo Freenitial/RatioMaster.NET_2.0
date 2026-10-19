@@ -43,12 +43,12 @@
     <RootNamespace>RatioMaster</RootNamespace>
     <AssemblyName>RatioMaster.NET</AssemblyName>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <AvaloniaVersion>12.1.3</AvaloniaVersion>
+    <AvaloniaVersion>12.1.4</AvaloniaVersion>
     <UseWindowsForms>false</UseWindowsForms>
     <UseWPF>false</UseWPF>
     <IsAotCompatible>true</IsAotCompatible>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <Version>2.2.0</Version>
+    <Version>2.3.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -65,7 +65,7 @@
   <PropertyGroup Condition="'$(IncludeAndroid)' == 'true'">
     <Nullable>enable</Nullable>
     <ApplicationId>net.ratiomaster.app</ApplicationId>
-    <ApplicationVersion>20200</ApplicationVersion>
+    <ApplicationVersion>20300</ApplicationVersion>
     <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
@@ -100,10 +100,13 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
     <EmbeddedResource Include="..\CHANGELOG.md" LogicalName="RatioMaster.CHANGELOG.md" />
+    <!-- Interface translations: one flat JSON object per language, loaded on demand (no satellite assemblies). -->
+    <EmbeddedResource Include="Localization\Languages\*.json" LogicalName="RatioMaster.Localization.%(Filename).json" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(Configuration)' == 'Debug' AND '$(IncludeAndroid)' != 'true'">
     <Compile Include="..\Tests\**\*.cs" Link="Tests\%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\Tests\RequestGoldens.txt" LogicalName="RatioMaster.Tests.RequestGoldens.txt" Condition="Exists('..\Tests\RequestGoldens.txt')" />
   </ItemGroup>
 
   <!-- Android-only: the Android windowing backend, drop the SDK's implicit Android.App/Android.Widget

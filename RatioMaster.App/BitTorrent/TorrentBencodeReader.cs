@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using RatioMaster.Localization;
 
 /// <summary>Strict, bounded metainfo decoding with exact source offsets for the info hashes.</summary>
 internal sealed class TorrentBencodeReader
@@ -22,7 +23,8 @@ internal sealed class TorrentBencodeReader
 
     private TorrentBencodeReader(byte[] source) => this.source = source;
 
-    internal static ValueDictionary Read(Stream stream, out byte[] sha1, out byte[] sha256)
+    /// <summary>Parses metainfo and returns the exact info dictionary bytes with their v1 and v2 hashes.</summary>
+    internal static ValueDictionary Read(Stream stream, out byte[] sha1, out byte[] sha256, out byte[] infoBytes)
     {
         ArgumentNullException.ThrowIfNull(stream);
         using MemoryStream buffer = new();
@@ -40,22 +42,23 @@ internal sealed class TorrentBencodeReader
 
         if (buffer.Length == MaxMetainfoBytes && stream.ReadByte() != -1)
         {
-            throw Error("Metainfo exceeds the 64 MiB limit.");
+            throw Error(Strings.TorrentMetainfoTooLarge);
         }
 
         TorrentBencodeReader reader = new(buffer.ToArray());
         IBEncodeValue value = reader.ReadValue(0);
         if (value is not ValueDictionary root || reader.position != reader.source.Length)
         {
-            throw Error("Metainfo must be one dictionary without trailing bytes.");
+            throw Error(Strings.TorrentMetainfoDictionaryWithoutTrailingBytes);
         }
 
         if (reader.infoStart < 0 || root["info"] is not ValueDictionary)
         {
-            throw Error("The info dictionary is missing or invalid.");
+            throw Error(Strings.TorrentInfoDictionaryMissingInvalid);
         }
 
         ReadOnlySpan<byte> info = reader.source.AsSpan(reader.infoStart, reader.infoLength);
+        infoBytes = info.ToArray();
         sha1 = SHA1.HashData(info);
         sha256 = SHA256.HashData(info);
         return root;
@@ -66,7 +69,7 @@ internal sealed class TorrentBencodeReader
         CountNode();
         if (depth > MaxDepth)
         {
-            throw Error("Bencoding nesting exceeds the depth limit.");
+            throw Error(Strings.TorrentBencodingNestingExceedsDepthLimit);
         }
 
         byte token = Peek();
@@ -105,13 +108,13 @@ internal sealed class TorrentBencodeReader
             (int start, int length) = ReadStringRange();
             if (length > MaxKeyBytes)
             {
-                throw Error("Dictionary key exceeds the 4096-byte limit.");
+                throw Error(Strings.TorrentDictionaryKeyTooLong);
             }
 
             if (hasPrevious && source.AsSpan(previousStart, previousLength)
                     .SequenceCompareTo(source.AsSpan(start, length)) >= 0)
             {
-                throw Error("Dictionary keys must be unique and sorted by their raw bytes.");
+                throw Error(Strings.TorrentDictionaryKeysUniqueSortedRaw);
             }
 
             string key = Encoding.Latin1.GetString(source, start, length);
@@ -149,7 +152,7 @@ internal sealed class TorrentBencodeReader
             byte digit = source[position];
             if (digit < (byte)'0' || digit > (byte)'9' || position - digitsStart >= 19)
             {
-                throw Error("Invalid or oversized bencoded integer.");
+                throw Error(Strings.TorrentInvalidOversizedBencodedInteger);
             }
 
             position++;
@@ -158,13 +161,13 @@ internal sealed class TorrentBencodeReader
         int digits = position - digitsStart;
         if (digits == 0 || (source[digitsStart] == (byte)'0' && (digits != 1 || negative)))
         {
-            throw Error("Bencoded integers must use canonical decimal notation.");
+            throw Error(Strings.TorrentBencodedIntegersUseCanonicalDecimal);
         }
 
         string text = Encoding.ASCII.GetString(source, start, position - start);
         if (!long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
         {
-            throw Error("Bencoded integer is outside the signed 64-bit range.");
+            throw Error(Strings.TorrentIntegerOutOfRange);
         }
 
         position++;
@@ -181,25 +184,25 @@ internal sealed class TorrentBencodeReader
             byte digit = source[position++];
             if (digit < (byte)'0' || digit > (byte)'9' || ++digits > 8)
             {
-                throw Error("Invalid bencoded string length.");
+                throw Error(Strings.TorrentInvalidBencodedStringLength);
             }
 
             length = length * 10 + digit - (byte)'0';
             if (length > MaxMetainfoBytes)
             {
-                throw Error("Bencoded string exceeds the metainfo size limit.");
+                throw Error(Strings.TorrentBencodedStringExceedsMetainfoSize);
             }
         }
 
         if (digits == 0 || (digits > 1 && first == (byte)'0'))
         {
-            throw Error("Bencoded strings must use canonical decimal lengths.");
+            throw Error(Strings.TorrentBencodedStringsUseCanonicalDecimal);
         }
 
         position++;
         if (length > source.Length - position)
         {
-            throw Error("Truncated bencoded string.");
+            throw Error(Strings.TorrentTruncatedBencodedString);
         }
 
         int start = position;
@@ -211,7 +214,7 @@ internal sealed class TorrentBencodeReader
     {
         if (position == source.Length)
         {
-            throw Error("Unexpected end of bencoded data.");
+            throw Error(Strings.TorrentUnexpectedEndBencodedData);
         }
 
         return source[position];
@@ -221,7 +224,7 @@ internal sealed class TorrentBencodeReader
     {
         if (++nodes > MaxNodes)
         {
-            throw Error("Bencoding exceeds the node limit.");
+            throw Error(Strings.TorrentBencodingExceedsNodeLimit);
         }
     }
 

@@ -616,7 +616,14 @@ function Test-WindowsStaticArtifact([string]$directory, [string]$rid) {
         if ($clrAddress -ne 0 -or $clrSize -ne 0) {
             throw 'The published executable contains a CLR header instead of the expected native output.'
         }
-        Log "[publish] Verified native $rid executable without graphics DLL sidecars."
+        $reader.Dispose()
+        $reader = $null
+        # A publish pipeline that skips Avalonia's XAML compilation still links, but the window would never open.
+        $image = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($executable))
+        if (-not $image.Contains('CompiledAvaloniaXaml')) {
+            throw 'The published executable lacks the compiled XAML (UseOptimizedPublish must stay false).'
+        }
+        Log "[publish] Verified native $rid executable with compiled XAML and without graphics DLL sidecars."
         return $true
     }
     catch {
@@ -749,6 +756,27 @@ if ($doWinArm64) {
     }
     else {
         $built['Windows (win-arm64)'] = 'SKIPPED - MSVC ARM64 build tools missing (run the .bat as Administrator to install them)'
+    }
+}
+
+# ── 3b) Windows executables : Authenticode with the developer's code-signing certificate. A hardware token asks for
+#        its PIN in its own dialog; --nosign skips signing, and without a certificate the files stay unsigned. ──
+$windowsExecutables = @($built.Values | ForEach-Object { [string]$_ } | Where-Object { $_ -like '*.exe' -and [IO.File]::Exists($_) })
+if ($windowsExecutables.Count -gt 0) {
+    if ($argStr -match '(?i)--nosign\b') {
+        $built['Windows signature'] = 'NOT SIGNED - --nosign'
+    }
+    else {
+        Update-LoadingPopup 71 'Signing Windows executables (the token may ask for its PIN)...'
+        try {
+            $signLines = @(& (Join-Path $scriptDir 'Sign_WindowsExecutables.ps1') -Path $windowsExecutables *>&1 | ForEach-Object { [string]$_ })
+            if ($signLines.Count -gt 0) { Log ('[sign] ' + ($signLines -join "`r`n[sign] ")) }
+            $built['Windows signature'] = 'signed and time-stamped'
+        }
+        catch {
+            Log ('[sign] ' + $_.Exception.Message)
+            $built['Windows signature'] = 'UNSIGNED - ' + $_.Exception.Message
+        }
     }
 }
 

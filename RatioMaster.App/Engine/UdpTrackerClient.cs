@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using RatioMaster.BitTorrent;
+using RatioMaster.Localization;
 
 /// <summary>
 /// Direct UDP tracker transport (BEP 15). Callers must exclude proxy sessions before calling.
@@ -135,7 +136,7 @@ internal sealed class UdpTrackerClient
                     if (!hasConnection)
                     {
                         int length = await ExchangeAsync(socket, connect, receiveBuffer, retry, operationCt).ConfigureAwait(false);
-                        RequireLength(length, 16, "connect");
+                        RequireLength(length, 16);
                         connectionId = BinaryPrimitives.ReadUInt64BigEndian(receiveBuffer.AsSpan(8));
                         connectedAt = timeProvider.GetTimestamp();
                         hasConnection = true;
@@ -175,10 +176,10 @@ internal sealed class UdpTrackerClient
             operationCt.ThrowIfCancellationRequested();
             if (lastFailure is TimeoutException)
             {
-                throw new TimeoutException("UDP tracker retry limit reached.", lastFailure);
+                throw new TimeoutException(Strings.UdpTrackerRetryLimitReached, lastFailure);
             }
 
-            throw new IOException("UDP tracker retry limit reached.", lastFailure);
+            throw new IOException(Strings.UdpTrackerRetryLimitReached, lastFailure);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -186,7 +187,7 @@ internal sealed class UdpTrackerClient
         }
         catch (OperationCanceledException ex) when (deadline.IsCancellationRequested)
         {
-            throw new TimeoutException("UDP tracker operation exceeded four minutes.", ex);
+            throw new TimeoutException(Strings.UdpTrackerOperationTooLong, ex);
         }
         finally
         {
@@ -206,7 +207,7 @@ internal sealed class UdpTrackerClient
             int sent = await socket.SendAsync(packet.AsMemory(), SocketFlags.None, attemptCt).ConfigureAwait(false);
             if (sent != packet.Length)
             {
-                throw new IOException("UDP tracker request was not sent in full.");
+                throw new IOException(Strings.UdpTrackerRequestIncomplete);
             }
 
             while (true)
@@ -222,7 +223,7 @@ internal sealed class UdpTrackerClient
 
                 if (length > MaxPacketBytes)
                 {
-                    throw new InvalidDataException("UDP tracker response exceeds the packet size limit.");
+                    throw new InvalidDataException(Strings.UdpTrackerResponseExceedsPacket);
                 }
 
                 int action = BinaryPrimitives.ReadInt32BigEndian(buffer);
@@ -230,7 +231,7 @@ internal sealed class UdpTrackerClient
                 {
                     int messageLength = Math.Min(length - 8, 1024);
                     string message = Encoding.UTF8.GetString(buffer, 8, messageLength);
-                    string suffix = length - 8 > messageLength ? " (truncated)" : string.Empty;
+                    string suffix = length - 8 > messageLength ? "…" : string.Empty;
                     throw new TrackerRejectedException(message + suffix);
                 }
 
@@ -269,7 +270,7 @@ internal sealed class UdpTrackerClient
 
             if (usable.Count == 0)
             {
-                throw new IOException("UDP tracker has no address supported by this host.");
+                throw new IOException(Strings.UdpTrackerHasNoAddress);
             }
 
             // Put the other address family next so a silent route cannot exhaust every attempt on one family.
@@ -285,13 +286,13 @@ internal sealed class UdpTrackerClient
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && deadline.IsCancellationRequested)
         {
-            throw new TimeoutException("UDP tracker DNS lookup timed out.", ex);
+            throw new TimeoutException(Strings.UdpTrackerDnsTimedOut, ex);
         }
     }
 
     private static ValueDictionary ParseResponse(ReadOnlySpan<byte> packet, AddressFamily family, int action)
     {
-        RequireLength(packet.Length, 20, action == 1 ? "announce" : "scrape");
+        RequireLength(packet.Length, 20);
         ValueDictionary result = new();
         if (action == 2)
         {
@@ -304,7 +305,7 @@ internal sealed class UdpTrackerClient
         int stride = family == AddressFamily.InterNetworkV6 ? 18 : 6;
         if ((packet.Length - 20) % stride != 0)
         {
-            throw new InvalidDataException("UDP tracker announce contains an incomplete compact peer record.");
+            throw new InvalidDataException(Strings.UdpTrackerAnnounceContainsIncomplete);
         }
 
         result["interval"] = new ValueNumber(BinaryPrimitives.ReadUInt32BigEndian(packet[8..]));
@@ -337,7 +338,7 @@ internal sealed class UdpTrackerClient
         int chunks = Math.Max(1, (byteCount + 254) / 255);
         if (byteCount > MaxPacketBytes - 98 || 98 + byteCount + 2 * chunks > MaxPacketBytes)
         {
-            throw new ArgumentException("UDP tracker URL does not fit in an announce datagram.", nameof(tracker));
+            throw new ArgumentException(Strings.UdpTrackerUrlTooLong, nameof(tracker));
         }
 
         byte[] url = Encoding.UTF8.GetBytes(pathAndQuery);
@@ -364,12 +365,12 @@ internal sealed class UdpTrackerClient
             || !tracker.OriginalString.StartsWith("udp://", StringComparison.OrdinalIgnoreCase)
             || tracker.Host.Length == 0 || tracker.Port is < 1 or > 65535)
         {
-            throw new ArgumentException("An absolute udp:// tracker URL with an explicit port is required.", nameof(tracker));
+            throw new ArgumentException(Strings.UdpTrackerUrlNeedsPort, nameof(tracker));
         }
 
         if (tracker.UserInfo.Length != 0)
         {
-            throw new ArgumentException("UDP tracker user-info authentication is unsupported; use a path/query passkey.", nameof(tracker));
+            throw new ArgumentException(Strings.UdpTrackerUserInfoUnsupported, nameof(tracker));
         }
     }
 
@@ -378,15 +379,15 @@ internal sealed class UdpTrackerClient
         ArgumentNullException.ThrowIfNull(value, name);
         if (value.Length != 20)
         {
-            throw new ArgumentException("Exactly 20 bytes are required.", name);
+            throw new ArgumentException(Strings.Udp20BytesRequired, name);
         }
     }
 
-    private static void RequireLength(int actual, int minimum, string action)
+    private static void RequireLength(int actual, int minimum)
     {
         if (actual < minimum)
         {
-            throw new InvalidDataException($"UDP tracker {action} response is truncated ({actual} bytes, minimum {minimum}).");
+            throw new InvalidDataException(Strings.UdpTrackerResponseTruncated(actual, minimum));
         }
     }
 }

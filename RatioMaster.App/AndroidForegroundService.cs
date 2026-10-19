@@ -21,6 +21,7 @@ internal sealed class RatioForegroundService : Service
 {
     internal const string ChannelId = "ratiomaster.session";
     private const int NotificationId = 1;
+    private static volatile bool foreground;
 
     public override IBinder? OnBind(Intent? intent) => null;
 
@@ -35,7 +36,8 @@ internal sealed class RatioForegroundService : Service
         try
         {
             // Complete a pending foreground-start request even if its session has already stopped.
-            StartForeground(NotificationId, BuildNotification());
+            StartForeground(NotificationId, BuildNotification(this));
+            foreground = true;
         }
         catch (Exception exception)
         {
@@ -60,8 +62,23 @@ internal sealed class RatioForegroundService : Service
 
     public override void OnDestroy()
     {
+        foreground = false;
         StopForeground(StopForegroundFlags.Remove);
         base.OnDestroy();
+    }
+
+    /// <summary>Renames the channel and rewrites the ongoing notification in a new interface language.</summary>
+    internal static void Relocalize(Context context)
+    {
+        try
+        {
+            EnsureChannel(context);
+            if (foreground) NotificationManagerCompat.From(context).Notify(NotificationId, BuildNotification(context));
+        }
+        catch (Exception exception)
+        {
+            Android.Util.Log.Warn("RatioMaster", $"Unable to relabel the session notification: {exception}");
+        }
     }
 
     internal static void EnsureChannel(Context context)
@@ -74,28 +91,29 @@ internal sealed class RatioForegroundService : Service
 
         NotificationChannel channel = new(
             ChannelId,
-            "Active sessions",
+            RatioMaster.Localization.Strings.AndroidChannelName,
             NotificationImportance.Low)
         {
-            Description = "Shown while RatioMaster sessions are running or paused.",
+            Description = RatioMaster.Localization.Strings.AndroidChannelDescription,
         };
 
         channel.SetShowBadge(false);
+        // Creating an existing channel again updates its name and description.
         (context.GetSystemService(NotificationService) as NotificationManager)?.CreateNotificationChannel(channel);
     }
 
-    private Notification BuildNotification()
+    private static Notification BuildNotification(Context context)
     {
         // Reuse the activity in its existing task when the notification is opened.
-        Intent open = new(this, typeof(MainActivity));
+        Intent open = new(context, typeof(MainActivity));
         open.SetFlags(ActivityFlags.NewTask | ActivityFlags.SingleTop | ActivityFlags.ClearTop);
         PendingIntent? tap = PendingIntent.GetActivity(
-            this, 0, open, PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
+            context, 0, open, PendingIntentFlags.Immutable | PendingIntentFlags.UpdateCurrent);
 
         // Builder setters mutate in place and have nullable return annotations.
-        NotificationCompat.Builder builder = new(this, ChannelId);
+        NotificationCompat.Builder builder = new(context, ChannelId);
         builder.SetContentTitle("RatioMaster.NET");
-        builder.SetContentText("Sessions active (running or paused). Tap to open.");
+        builder.SetContentText(RatioMaster.Localization.Strings.AndroidNotificationText);
         builder.SetSmallIcon(Resource.Mipmap.icon);
         builder.SetContentIntent(tap);
         builder.SetOngoing(true);
@@ -123,6 +141,8 @@ internal static class ForegroundSessionBridge
             {
                 app = context.ApplicationContext ?? Android.App.Application.Context;
                 SessionActivity.ActiveChanged += OnActiveChanged;
+                Context relabel = app;
+                RatioMaster.Localization.Language.Changed += () => RatioForegroundService.Relocalize(relabel);
             }
 
             SynchronizeService();

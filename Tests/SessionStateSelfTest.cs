@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using RatioMaster.Engine;
+using RatioMaster.Services;
 using RatioMaster.Models;
 
 /// <summary>Local tracker checks for manual pause and automatic leecher gating.</summary>
@@ -29,7 +30,7 @@ internal static class SessionStateSelfTest
                     string? line = await reader.ReadLineAsync(done.Token);
                     while (await reader.ReadLineAsync(done.Token) is { Length: > 0 }) { }
                     Interlocked.Increment(ref requests);
-                    byte[] body = Encoding.ASCII.GetBytes($"d8:completei4e10:incompletei{Volatile.Read(ref leechers)}e8:intervali120e5:peers0:e");
+                    byte[] body = Encoding.ASCII.GetBytes($"d8:completei4e10:incompletei{Volatile.Read(ref leechers)}e8:intervali120e12:min intervali0e5:peers0:e");
                     if (Volatile.Read(ref rejectAnnounces) != 0
                         || (Volatile.Read(ref failStopped) != 0 && line?.Contains("event=stopped") == true))
                         body = Encoding.ASCII.GetBytes("d14:failure reason8:rejectede");
@@ -133,6 +134,7 @@ internal static class SessionStateSelfTest
         public bool RandomDownloadEnabled => false;
         public string StopWhen { get; init; } = "Never";
         public string StopValue { get; init; } = "";
+        public StopConditionSettings StopCondition => new(SessionSettings.ParseStopCondition(StopWhen), StopValue);
         public void ApplyAlert(EngineAlert level, string message) { }
     }
 }

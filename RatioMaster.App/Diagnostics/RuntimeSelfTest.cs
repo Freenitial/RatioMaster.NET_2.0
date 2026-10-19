@@ -28,6 +28,15 @@ internal static class RuntimeSelfTest
             string json = JsonSerializer.Serialize(saved, AppJsonContext.Default.SessionData);
             if (SessionStore.Decode(json).Tabs[0].KeyIsGenerated != true)
                 throw new InvalidOperationException("Session serialization failed.");
+            foreach (Localization.LanguageInfo language in Localization.Language.All)
+            {
+                if (language == Localization.Language.English) continue;
+                if (Localization.Language.Load(language.Code) is not { } table || !table.TryGetValue("ActionStart", out string? start) || start.Length == 0)
+                    throw new InvalidOperationException("The embedded translation is unavailable: " + language.Code);
+            }
+            Engine.MessageStreamEncryption.KeyPair first = new(), second = new();
+            if (!first.Secret(second.Public).AsSpan().SequenceEqual(second.Secret(first.Public)))
+                throw new InvalidOperationException("Encrypted peer key agreement failed.");
             using SkiaSharp.SKBitmap bitmap = new(8, 8);
             bitmap.Erase(SkiaSharp.SKColors.Black);
             if (bitmap.GetPixel(0, 0) != SkiaSharp.SKColors.Black)
@@ -38,7 +47,7 @@ internal static class RuntimeSelfTest
             text.GuessSegmentProperties();
             if (text.Length != sample.Length)
                 throw new InvalidOperationException("Native text initialization failed.");
-            Console.WriteLine("Runtime checks passed: profiles, serialization, Skia and HarfBuzz. No user data or network used.");
+            Console.WriteLine("Runtime checks passed: profiles, serialization, translations, key agreement, Skia and HarfBuzz. No user data or network used.");
             return 0;
         }
         catch (Exception ex)

@@ -22,11 +22,8 @@ internal interface IEngineHost
     /// <summary>"Random" for the download direction. Independent of the upload flag.</summary>
     bool RandomDownloadEnabled { get; }
 
-    string StopWhen { get; }
-
-    string StopValue { get; }
-
-    StopConditionSettings StopCondition => new(StopWhen, StopValue);
+    /// <summary>The condition and its threshold, published together so the engine never reads a torn pair.</summary>
+    StopConditionSettings StopCondition { get; }
 
     // engine -> UI (must marshal to the UI thread).
 
@@ -34,4 +31,17 @@ internal interface IEngineHost
     void ApplyAlert(EngineAlert level, string message);
 }
 
-internal sealed record StopConditionSettings(string Condition, string Value);
+/// <summary>Automatic stop rules. Display text is localized separately; sessions persist the stable identifiers.</summary>
+public enum StopCondition
+{
+    Never,
+    RatioAbove,
+    UploadAbove,
+    DownloadAbove,
+    AfterTime,
+    SeedersBelow,
+    LeechersBelow,
+    SwarmRatioBelow,
+}
+
+internal sealed record StopConditionSettings(StopCondition Condition, string Value);

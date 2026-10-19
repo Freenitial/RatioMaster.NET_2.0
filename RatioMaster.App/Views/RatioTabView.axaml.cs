@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
@@ -14,6 +15,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using RatioMaster.Localization;
 using RatioMaster.ViewModels;
 
 namespace RatioMaster.Views;
@@ -245,8 +247,8 @@ public partial class RatioTabView : UserControl
         if (sender is not TextBlock label || e.NewSize.Width <= 0) return;
         var (full, compact) = label.Name switch
         {
-            "ManualUpdateLabel" => ("Manual update", "Update"),
-            "DefaultsLabel" => ("Set defaults", "Defaults"),
+            "ManualUpdateLabel" => (Strings.ActionManualUpdate, Strings.ActionManualUpdateShort),
+            "DefaultsLabel" => (Strings.ActionSetDefaults, Strings.ActionSetDefaultsShort),
             _ => (string.Empty, string.Empty),
         };
         if (full.Length == 0) return;
@@ -290,6 +292,11 @@ public partial class RatioTabView : UserControl
 
     private async void OnBrowseClick(object? sender, RoutedEventArgs e) => await BrowseAsync();
 
+    private async void OnAddFolderClick(object? sender, RoutedEventArgs e) => await AddFolderAsync();
+
+    private MainWindowViewModel? Window => this.FindAncestorOfType<MainView>()?.DataContext as MainWindowViewModel;
+
+    /// <summary>Opens one or more .torrent files: the first fills this tab when it is empty, the others open new tabs.</summary>
     internal async Task BrowseAsync()
     {
         RatioTabViewModel? target = Vm;
@@ -309,62 +316,131 @@ public partial class RatioTabView : UserControl
 
             var files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                Title = "Select a .torrent file",
-                AllowMultiple = false,
+                Title = Strings.PickTorrentsTitle,
+                AllowMultiple = true,
                 SuggestedStartLocation = start,
                 FileTypeFilter =
                 [
-                    new FilePickerFileType("Torrent files") { Patterns = ["*.torrent"] },
-                    new FilePickerFileType("All files") { Patterns = ["*"] },
+                    new FilePickerFileType(Strings.TorrentFiles) { Patterns = ["*.torrent"] },
+                    new FilePickerFileType(Strings.AllFiles) { Patterns = ["*"] },
                 ],
             });
+            if (files.Count == 0) return; // user cancelled
 
-            IStorageFile? file = files.FirstOrDefault();
-            if (file is null || !target.InputsEnabled)
+            // One file replaces this tab's torrent, as before; several open in new tabs after this one.
+            if (files.Count == 1)
             {
-                return; // user cancelled
-            }
-
-            string? path = file.TryGetLocalPath();
-            if (!string.IsNullOrEmpty(path))
-            {
-                // Desktop: a real filesystem path — load it directly (also seeds LastDirectory + restore).
-                target.SetTorrentPath(path);
+                if (target.InputsEnabled) await OpenSingleAsync(target, files[0]);
                 return;
             }
-
-            // Android: the Storage Access Framework returns a content:// URI with no filesystem path, so
-            // TryGetLocalPath() is null. Read the bytes through the storage stream (which DOES resolve the
-            // content URI) and hand them to the VM. This branch has its OWN try/catch so a read failure is
-            // reported instead of vanishing into the outer picker-cancelled catch (a silent empty box).
-            byte[]? data;
-            try
-            {
-                data = await ReadCappedAsync(file, MaxTorrentBytes);
-            }
-            catch
-            {
-                // e.g. a cloud/virtual document that can't be materialized, or a released read grant.
-                target.StatusText = "Couldn't read the selected file.";
-                return;
-            }
-
-            if (data is null)
-            {
-                // The "All files" filter lets the user pick anything, and a .torrent is tiny — the read is
-                // capped so a huge pick can't exhaust memory even when the provider reports no size.
-                target.StatusText = "That file is too large to be a .torrent.";
-                return;
-            }
-
-            if (target?.InputsEnabled == true)
-            {
-                target.SetTorrentContent(data, file.Name);
-            }
+            List<TorrentSource> sources = await ReadSourcesAsync(files);
+            if (Window is { } window) window.RequestAddTorrents(sources, target);
         }
         catch
         {
             // user cancelled or picker unavailable
+        }
+    }
+
+    /// <summary>Adds every .torrent of a folder, through the platform picker (Android storage included).</summary>
+    internal async Task AddFolderAsync()
+    {
+        RatioTabViewModel? target = Vm;
+        try
+        {
+            TopLevel? top = TopLevel.GetTopLevel(this);
+            if (top == null || target == null || Window is not { } window) return;
+            IStorageFolder? start = string.IsNullOrEmpty(target.LastDirectory) ? null
+                : await top.StorageProvider.TryGetFolderFromPathAsync(target.LastDirectory);
+            var folders = await top.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = Strings.PickFolderTitle,
+                AllowMultiple = false,
+                SuggestedStartLocation = start,
+            });
+            if (folders.FirstOrDefault() is not { } folder) return;
+            if (folder.TryGetLocalPath() is { Length: > 0 } local)
+            {
+                IReadOnlyList<TorrentSource> found = MainWindowViewModel.ExpandPaths([local]);
+                if (found.Count == 0) RatioMaster.Services.NotificationHub.Show(Strings.BatchTitle, Strings.FolderEmpty);
+                else window.RequestAddTorrents(found, target);
+                return;
+            }
+            List<IStorageFile> files = [];
+            await foreach (IStorageItem item in folder.GetItemsAsync())
+            {
+                if (item is IStorageFile file && file.Name.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase)) files.Add(file);
+            }
+            files.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name));
+            if (files.Count == 0)
+            {
+                RatioMaster.Services.NotificationHub.Show(Strings.BatchTitle, Strings.FolderEmpty);
+                return;
+            }
+            window.RequestAddTorrents(await ReadSourcesAsync(files), target);
+        }
+        catch
+        {
+            // user cancelled or picker unavailable
+        }
+    }
+
+    /// <summary>Picked files as sources; one that cannot be read becomes an empty source, counted as invalid in the summary.</summary>
+    private static async Task<List<TorrentSource>> ReadSourcesAsync(IEnumerable<IStorageFile> files)
+    {
+        List<TorrentSource> sources = [];
+        foreach (IStorageFile file in files)
+        {
+            if (file.TryGetLocalPath() is { Length: > 0 } path)
+            {
+                sources.Add(new TorrentSource(file.Name, path));
+                continue;
+            }
+            byte[]? data;
+            try { data = await ReadCappedAsync(file, MaxTorrentBytes); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { data = null; }
+            sources.Add(new TorrentSource(file.Name, Data: data ?? []));
+        }
+        return sources;
+    }
+
+    private async Task OpenSingleAsync(RatioTabViewModel target, IStorageFile file)
+    {
+        string? path = file.TryGetLocalPath();
+        if (!string.IsNullOrEmpty(path))
+        {
+            // Desktop: a real filesystem path — load it directly (also seeds LastDirectory + restore).
+            target.SetTorrentPath(path);
+            return;
+        }
+
+        // Android: the Storage Access Framework returns a content:// URI with no filesystem path, so
+        // TryGetLocalPath() is null. Read the bytes through the storage stream (which DOES resolve the
+        // content URI) and hand them to the VM. This branch has its OWN try/catch so a read failure is
+        // reported instead of vanishing into the outer picker-cancelled catch (a silent empty box).
+        byte[]? data;
+        try
+        {
+            data = await ReadCappedAsync(file, MaxTorrentBytes);
+        }
+        catch
+        {
+            // e.g. a cloud/virtual document that can't be materialized, or a released read grant.
+            target.ShowStatus(() => Strings.FileUnreadable);
+            return;
+        }
+
+        if (data is null)
+        {
+            // The "All files" filter lets the user pick anything, and a .torrent is tiny — the read is
+            // capped so a huge pick can't exhaust memory even when the provider reports no size.
+            target.ShowStatus(() => Strings.FileTooLarge);
+            return;
+        }
+
+        if (target.InputsEnabled)
+        {
+            target.SetTorrentContent(data, file.Name);
         }
     }
 
@@ -398,7 +474,7 @@ public partial class RatioTabView : UserControl
     {
         if (Vm is not { } vm || TopLevel.GetTopLevel(this)?.Clipboard is not { } clipboard) return;
         try { await clipboard.SetTextAsync(vm.VisibleLogText); }
-        catch (Exception ex) { RatioMaster.Services.NotificationHub.Show("Unable to copy log", ex.Message, error: true); }
+        catch (Exception ex) { RatioMaster.Services.NotificationHub.Show(Strings.CopyFailedTitle, ex.Message, error: true); }
     }
 
     private async void OnSaveLogClick(object? sender, RoutedEventArgs e)
@@ -415,10 +491,10 @@ public partial class RatioTabView : UserControl
         {
             file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
             {
-                Title = "Save log",
+                Title = Strings.SaveLogTitle,
                 SuggestedFileName = "ratiomaster-log.txt",
                 DefaultExtension = "txt",
-                FileTypeChoices = [new FilePickerFileType("Text file") { Patterns = ["*.txt"] }],
+                FileTypeChoices = [new FilePickerFileType(Strings.TextFile) { Patterns = ["*.txt"] }],
             });
         }
         catch
@@ -443,38 +519,44 @@ public partial class RatioTabView : UserControl
             using StreamWriter writer = new(stream);
             await writer.WriteAsync(vm.VisibleLogText);
             await writer.FlushAsync();
-            vm.StatusText = "Log saved to " + file.Name;
+            string name = file.Name;
+            vm.ShowStatus(() => Strings.LogSaved(name));
         }
         catch (Exception ex)
         {
-            vm.StatusText = "Failed to save log: " + ex.Message;
+            string reason = ex.Message;
+            vm.ShowStatus(() => Strings.LogSaveFailed(reason));
         }
     }
 
+    private static IReadOnlyList<string> DroppedPaths(DragEventArgs e) =>
+        e.DataTransfer?.TryGetFiles()?.Select(item => item.TryGetLocalPath()).OfType<string>().ToArray() ?? [];
+
     private void OnDragOver(object? sender, DragEventArgs e)
     {
-        // Honestly reflect what a drop will do: OnDrop only accepts a .torrent, so show the Copy cursor
-        // only for a .torrent — otherwise the affordance and the action disagree (cursor says "drop OK",
-        // drop silently does nothing).
-        string? path = e.DataTransfer?.TryGetFiles()?.FirstOrDefault()?.TryGetLocalPath();
-        bool acceptable = Vm?.InputsEnabled == true && !string.IsNullOrEmpty(path)
-            && path.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase);
+        // Honestly reflect what a drop will do: torrents and folders are accepted, anything else is not.
+        // Raised on every pointer move: the cheap name test runs before the file-system call.
+        bool acceptable = Vm is not null && DroppedPaths(e).Any(path => path.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase)
+            || Directory.Exists(path));
         e.DragEffects = acceptable ? DragDropEffects.Copy : DragDropEffects.None;
     }
 
     private void OnDrop(object? sender, DragEventArgs e)
     {
-        if (Vm is null || !Vm.InputsEnabled)
+        if (Vm is not { } target)
         {
             return;
         }
 
-        IStorageItem? item = e.DataTransfer?.TryGetFiles()?.FirstOrDefault();
-        string? path = item?.TryGetLocalPath();
-        if (!string.IsNullOrEmpty(path) && path.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase))
+        IReadOnlyList<string> paths = DroppedPaths(e);
+        // One torrent dropped on a stopped tab replaces its torrent; anything else opens new tabs.
+        if (paths.Count == 1 && !Directory.Exists(paths[0]) && paths[0].EndsWith(".torrent", StringComparison.OrdinalIgnoreCase)
+            && target.InputsEnabled)
         {
-            Vm.SetTorrentPath(path);
+            target.SetTorrentPath(paths[0]);
+            return;
         }
+        if (Window is { } window) window.RequestAddTorrents(MainWindowViewModel.ExpandPaths(paths), target);
     }
 }
 

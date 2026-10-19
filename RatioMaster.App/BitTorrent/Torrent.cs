@@ -1,6 +1,7 @@
 namespace RatioMaster.BitTorrent;
 
 using System.IO;
+using RatioMaster.Localization;
 
 /// <summary>A validated BEP 3 / BEP 52 metainfo snapshot.</summary>
 internal sealed class Torrent
@@ -21,7 +22,7 @@ internal sealed class Torrent
     internal Torrent(Stream stream) => metadata = TorrentMetainfo.Read(stream);
 
     private TorrentMetainfo Metadata => metadata
-        ?? throw new IncompleteTorrentData("No torrent has been loaded.");
+        ?? throw new IncompleteTorrentData(Strings.TorrentNotLoaded);
 
     /// <summary>Swarm byte length; hybrids include their v1 padding files.</summary>
     internal ulong TotalLength => Metadata.TotalLength;
@@ -46,6 +47,10 @@ internal sealed class Torrent
 
     /// <summary>Announce URL, first announce-list URL, or empty for trackerless metainfo.</summary>
     internal string Announce => Metadata.Announce;
+
+    internal bool IsPrivate => Metadata.IsPrivate;
+
+    internal ReadOnlyMemory<byte> InfoBytes => Metadata.InfoBytes;
 
     internal bool OpenTorrent(string localFilename)
     {

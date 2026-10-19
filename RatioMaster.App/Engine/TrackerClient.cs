@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Text;
 using RatioMaster.Models;
+using RatioMaster.Localization;
 
 /// <summary>Bounded HTTP tracker transport preserving escaped request targets and explicit proxy routing.</summary>
 internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
@@ -26,10 +27,10 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
             for (int redirect = 0; ; redirect++)
             {
                 if (!TryParseUrl(url, out string scheme, out string host, out int port, out string pathAndQuery))
-                    throw new IOException("Invalid HTTP tracker URL.");
+                    throw new IOException(Strings.HttpInvalidTrackerUrl);
                 CancellationToken ioCt = deadline.Token;
                 bool https = scheme == "https";
-                log($"Connecting to tracker ({host}) on port {port}");
+                log(Strings.LogConnecting(host, port));
                 using Socket socket = await ConnectAsync(host, port, ioCt).ConfigureAwait(false);
                 using NetworkStream network = new(socket, ownsSocket: false);
                 using SslStream? tls = https ? new(network, leaveInnerStreamOpen: true) : null;
@@ -38,77 +39,74 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
                     await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = host }, ioCt).ConfigureAwait(false);
 
                 string request = BuildRequest(pathAndQuery, Authority(host, port, https ? 443 : 80), client);
-                log("======== Sending Command to Tracker ========");
+                log(Strings.LogSendingRequest);
                 log(request);
                 await stream.WriteAsync(Latin1.GetBytes(request), ioCt).ConfigureAwait(false);
                 await stream.FlushAsync(ioCt).ConfigureAwait(false);
                 TrackerResponse response = new(await HttpResponseReader.ReadAsync(stream, ioCt).ConfigureAwait(false), ioCt);
                 if (response.DoRedirect)
                 {
-                    if (redirect >= MaxRedirects) throw new IOException("Tracker exceeded the limit of five redirects.");
+                    if (redirect >= MaxRedirects) throw new IOException(Strings.HttpTooManyRedirects);
                     string destination = ResolveRedirect(url, response.RedirectionUrl);
                     if (!TryParseUrl(destination, out string nextScheme, out _, out _, out _))
-                        throw new IOException("Invalid tracker redirect destination.");
+                        throw new IOException(Strings.HttpInvalidTrackerRedirectDestination);
                     if (https && nextScheme == "http")
-                        throw new IOException("Refusing an insecure HTTPS-to-HTTP tracker redirect.");
-                    log("Following tracker redirect.");
+                        throw new IOException(Strings.HttpInsecureRedirectRefused);
+                    log(Strings.LogFollowingRedirect);
                     url = destination;
                     continue;
                 }
-                log("======== Tracker Response ========");
+                log(Strings.LogTrackerResponse);
                 log(response.Headers);
-                if (response.Oversized) log("*** Tracker response exceeds the 8 MiB decoded body limit.");
-                else if (response.StatusCode >= 400) log($"*** Tracker returned HTTP {response.StatusCode}.");
+                if (response.Oversized) log("*** " + Strings.HttpDecodedBodyTooLarge);
+                else if (response.StatusCode >= 400) log("*** " + Strings.TrackerHttpStatus(response.StatusCode));
                 else if (response.Error is { Length: > 0 }) log("*** " + response.Error);
-                else if (response.Dict is null) log("*** Tracker response is not a complete bencoded dictionary.");
+                else if (response.Dict is null) log("*** " + Strings.HttpNotBencodedDictionary);
                 return response;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (OperationCanceledException ex)
         {
-            throw new IOException("Tracker request timed out, including connection and redirect time.", ex);
+            throw new IOException(Strings.HttpRequestTimedOut, ex);
         }
         catch (AuthenticationException ex)
         {
-            throw new IOException("Tracker TLS authentication or certificate validation failed: " + ex.Message, ex);
+            throw new IOException(Strings.HttpTlsFailed(ex.Message), ex);
         }
         catch (Exception ex) when (ex is SocketException or IOException or ArgumentException)
         {
-            throw new IOException("Tracker request failed: " + ex.Message, ex);
+            throw new IOException(Strings.HttpRequestFailed(ex.Message), ex);
         }
     }
 
-    private static string BuildRequest(string target, string authority, ClientProfile client)
+    internal static string BuildRequest(string target, string authority, ClientProfile client)
     {
         if (client.HttpProtocol is not ("HTTP/1.0" or "HTTP/1.1"))
-            throw new IOException("Unsupported HTTP version in client profile.");
+            throw new IOException(Strings.HttpProfileUnsupportedVersion);
         string headers = client.Headers.Replace("{host}", authority).TrimEnd('\r', '\n');
-        bool connection = false;
         int hostCount = 0;
         foreach (string line in headers.Split("\r\n", StringSplitOptions.None))
         {
             (string name, _) = HttpResponseReader.ParseField(line);
-            if (line.Any(c => c > 255)) throw new IOException("Client HTTP headers must contain Latin-1 characters.");
-            connection |= name.Equals("Connection", StringComparison.OrdinalIgnoreCase);
+            if (line.Any(c => c > 255)) throw new IOException(Strings.HttpHeadersNotLatin1);
             if (name.Equals("Host", StringComparison.OrdinalIgnoreCase)) hostCount++;
             if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
-                throw new IOException("A tracker GET profile cannot declare a request body.");
+                throw new IOException(Strings.HttpGetProfileWithBody);
         }
-        if (hostCount != 1) throw new IOException("Client HTTP profile must contain exactly one Host header.");
-        if (!connection) headers += "\r\nConnection: close";
+        if (hostCount != 1) throw new IOException(Strings.HttpProfileHostHeaderCount);
         return $"GET {EncodeTarget(target)} {client.HttpProtocol}\r\n{headers}\r\n\r\n";
     }
 
     private async Task<Socket> ConnectAsync(string host, int port, CancellationToken ct)
     {
         bool throughProxy = proxy.Kind != ProxyKind.None;
-        if (!Enum.IsDefined(proxy.Kind)) throw new IOException("Unknown proxy type.");
+        if (!Enum.IsDefined(proxy.Kind)) throw new IOException(Strings.HttpUnknownProxyType);
         string firstHost = throughProxy ? proxy.Host.Trim().Trim('[', ']') : host;
         int firstPort = throughProxy ? proxy.Port : port;
         if (string.IsNullOrWhiteSpace(firstHost) || firstPort is < 1 or > 65535)
-            throw new IOException("Invalid proxy or tracker endpoint.");
+            throw new IOException(Strings.HttpInvalidProxyTrackerEndpoint);
         Socket socket = await ConnectFirstHopAsync(firstHost, firstPort, ct).ConfigureAwait(false);
         try
         {
@@ -134,7 +132,7 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
             ? [literal] : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
         addresses = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork
             || (Socket.OSSupportsIPv6 && a.AddressFamily == AddressFamily.InterNetworkV6)).Distinct().ToArray();
-        if (addresses.Length == 0) throw new IOException("No supported IP address was found for the connection endpoint.");
+        if (addresses.Length == 0) throw new IOException(Strings.HttpNoSupportedAddress);
         // The shared request deadline bounds DNS and every connection attempt together.
         Exception? last = null;
         for (int attempt = 0; attempt < MaxConnectAttempts; attempt++)
@@ -160,9 +158,9 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
                 last = ex;
             }
             catch { socket.Dispose(); throw; }
-            if (attempt + 1 < MaxConnectAttempts) log($"Connection attempt {attempt + 1} failed; retrying the configured endpoint.");
+            if (attempt + 1 < MaxConnectAttempts) log(Strings.LogConnectRetry(attempt + 1));
         }
-        throw new IOException($"Could not establish the configured connection after {MaxConnectAttempts} attempts.", last);
+        throw new IOException(Strings.HttpConnectAttemptsExhausted(MaxConnectAttempts), last);
     }
 
     private static bool IsTransientConnectError(SocketError error) => error is
@@ -176,17 +174,17 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         StringBuilder request = new($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
         if (proxy.User.Length > 0)
         {
-            if (proxy.User.Contains(':')) throw new IOException("HTTP proxy username cannot contain a colon.");
+            if (proxy.User.Contains(':')) throw new IOException(Strings.HttpProxyUsernameHasColon);
             string token = Convert.ToBase64String(Utf8.GetBytes(proxy.User + ":" + proxy.Password));
             request.Append("Proxy-Authorization: Basic ").Append(token).Append("\r\n");
         }
         request.Append("\r\n");
         if (request.Length > HttpResponseReader.MaxProxyHeaderBytes)
-            throw new IOException("HTTP proxy credentials exceed the request header limit.");
+            throw new IOException(Strings.HttpProxyCredentialsExceedRequest);
         await stream.WriteAsync(Latin1.GetBytes(request.ToString()), ct).ConfigureAwait(false);
         HttpResponseReader.Message response = await HttpResponseReader.ReadConnectHeadersAsync(stream, ct).ConfigureAwait(false);
         if (response.StatusCode is < 200 or >= 300)
-            throw new IOException($"HTTP proxy CONNECT refused the tunnel (HTTP {response.StatusCode}).");
+            throw new IOException(Strings.HttpProxyTunnelRefused(response.StatusCode));
     }
 
     private async Task Socks4Async(Stream stream, string host, int port, bool remotely, CancellationToken ct)
@@ -198,10 +196,10 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
             if (!literal)
                 address = (await Dns.GetHostAddressesAsync(host, AddressFamily.InterNetwork, ct).ConfigureAwait(false)).FirstOrDefault();
             if (address is null || address.AddressFamily != AddressFamily.InterNetwork)
-                throw new IOException("SOCKS4 requires an IPv4 destination; use SOCKS5 for IPv6.");
+                throw new IOException(Strings.HttpSocks4RequiresIpv4);
         }
         byte[] user = Utf8.GetBytes(proxy.User);
-        if (user.Length > 255 || user.Contains((byte)0)) throw new IOException("Invalid or excessive SOCKS4 user ID.");
+        if (user.Length > 255 || user.Contains((byte)0)) throw new IOException(Strings.HttpInvalidSocks4UserId);
         byte[] domainBytes = domain ? DomainBytes(host) : [];
         using MemoryStream request = new();
         request.Write([4, 1, (byte)(port >> 8), (byte)port]);
@@ -213,7 +211,7 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         byte[] response = new byte[8];
         await stream.ReadExactlyAsync(response, ct).ConfigureAwait(false);
         if (response[0] != 0 || response[1] != 0x5A)
-            throw new IOException($"Invalid or refused SOCKS4 response (version {response[0]}, status 0x{response[1]:X2}).");
+            throw new IOException(Strings.HttpSocks4Refused(response[0], response[1].ToString("X2", CultureInfo.InvariantCulture)));
     }
 
     private async Task Socks5Async(Stream stream, string host, int port, CancellationToken ct)
@@ -222,12 +220,12 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         byte[] user = credentials ? Utf8.GetBytes(proxy.User) : [];
         byte[] password = credentials ? Utf8.GetBytes(proxy.Password) : [];
         if (credentials && (user.Length is < 1 or > 255 || password.Length is < 1 or > 255))
-            throw new IOException("SOCKS5 username and password must each contain 1 to 255 UTF-8 bytes.");
+            throw new IOException(Strings.HttpSocks5CredentialsLength);
         await stream.WriteAsync(credentials ? new byte[] { 5, 2, 0, 2 } : [5, 1, 0], ct).ConfigureAwait(false);
         byte[] method = new byte[2];
         await stream.ReadExactlyAsync(method, ct).ConfigureAwait(false);
         if (method[0] != 5 || (method[1] != 0 && !(method[1] == 2 && credentials)))
-            throw new IOException("SOCKS5 proxy selected an invalid or unoffered authentication method.");
+            throw new IOException(Strings.HttpSocks5ProxySelectedInvalidUnoffered);
         if (method[1] == 2)
         {
             using MemoryStream authentication = new();
@@ -238,7 +236,7 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
             await stream.WriteAsync(authentication.ToArray(), ct).ConfigureAwait(false);
             byte[] result = new byte[2];
             await stream.ReadExactlyAsync(result, ct).ConfigureAwait(false);
-            if (result[0] != 1 || result[1] != 0) throw new IOException("SOCKS5 authentication failed or returned an invalid version.");
+            if (result[0] != 1 || result[1] != 0) throw new IOException(Strings.HttpSocks5AuthenticationFailedReturnedInvalid);
         }
         using MemoryStream request = new();
         request.Write([5, 1, 0]);
@@ -258,19 +256,19 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         await stream.WriteAsync(request.ToArray(), ct).ConfigureAwait(false);
         byte[] head = new byte[4];
         await stream.ReadExactlyAsync(head, ct).ConfigureAwait(false);
-        if (head[0] != 5 || head[2] != 0) throw new IOException("Invalid SOCKS5 CONNECT response version or reserved byte.");
-        if (head[1] != 0) throw new IOException($"SOCKS5 proxy refused the destination (status 0x{head[1]:X2}).");
+        if (head[0] != 5 || head[2] != 0) throw new IOException(Strings.HttpInvalidSocks5ConnectResponse);
+        if (head[1] != 0) throw new IOException(Strings.HttpSocks5Refused(head[1].ToString("X2", CultureInfo.InvariantCulture)));
         int length = head[3] switch
         {
             1 => 4, 4 => 16, 3 => -1,
-            _ => throw new IOException("SOCKS5 proxy returned an unknown address type."),
+            _ => throw new IOException(Strings.HttpSocks5ProxyReturnedUnknownAddress),
         };
         if (length < 0)
         {
             byte[] count = new byte[1];
             await stream.ReadExactlyAsync(count, ct).ConfigureAwait(false);
             length = count[0];
-            if (length == 0) throw new IOException("SOCKS5 proxy returned an empty bound hostname.");
+            if (length == 0) throw new IOException(Strings.HttpSocks5ProxyReturnedEmptyBound);
         }
         await stream.ReadExactlyAsync(new byte[length + 2], ct).ConfigureAwait(false);
     }
@@ -280,11 +278,11 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         string ascii = new IdnMapping().GetAscii(host);
         byte[] bytes = Encoding.ASCII.GetBytes(ascii);
         if (bytes.Length is < 1 or > 255 || ascii.Any(c => c <= 32 || c >= 127))
-            throw new IOException("SOCKS destination hostname must contain 1 to 255 ASCII bytes.");
+            throw new IOException(Strings.HttpSocksHostnameLength);
         return bytes;
     }
 
-    private static string Authority(string host, int port, int defaultPort = -1) =>
+    internal static string Authority(string host, int port, int defaultPort = -1) =>
         (host.Contains(':') ? "[" + host + "]" : host) + (port == defaultPort ? string.Empty : ":" + port.ToString(CultureInfo.InvariantCulture));
 
     internal static bool TryParseUrl(string url, out string scheme, out string host, out int port, out string pathAndQuery)
@@ -324,7 +322,7 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
     internal static string ResolveRedirect(string current, string location)
     {
         if (location.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)) || location.Contains('\\'))
-            throw new IOException("Invalid characters in tracker redirect.");
+            throw new IOException(Strings.HttpInvalidCharactersTrackerRedirect);
         string reference = StripFragment(location);
         if (Uri.TryCreate(reference, UriKind.Absolute, out Uri? absolute)
             && absolute.Scheme is "http" or "https") return reference;
@@ -332,14 +330,14 @@ internal sealed class TrackerClient(ProxyConfig proxy, Action<string> log)
         if (reference.StartsWith("//", StringComparison.Ordinal)) return current[..(schemeEnd + 1)] + reference;
         int authorityEnd = current.IndexOfAny(['/', '?', '#'], schemeEnd + 3);
         string origin = authorityEnd < 0 ? current : current[..authorityEnd];
-        if (!TryParseUrl(current, out _, out _, out _, out string originalTarget)) throw new IOException("Invalid redirect base URL.");
+        if (!TryParseUrl(current, out _, out _, out _, out string originalTarget)) throw new IOException(Strings.HttpInvalidRedirectBaseUrl);
         if (reference.Length == 0) return origin + originalTarget;
         int query = originalTarget.IndexOf('?');
         string path = query < 0 ? originalTarget : originalTarget[..query];
         if (reference[0] == '?') return origin + path + reference;
         int colon = reference.IndexOf(':');
         int slash = reference.IndexOfAny(['/', '?']);
-        if (colon >= 0 && (slash < 0 || colon < slash)) throw new IOException("Unsupported tracker redirect protocol.");
+        if (colon >= 0 && (slash < 0 || colon < slash)) throw new IOException(Strings.HttpUnsupportedTrackerRedirectProtocol);
         string target = reference[0] == '/' ? reference : path[..(path.LastIndexOf('/') + 1)] + reference;
         query = target.IndexOf('?');
         string suffix = query < 0 ? string.Empty : target[query..];

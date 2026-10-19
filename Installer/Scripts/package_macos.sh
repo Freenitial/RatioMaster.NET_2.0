@@ -130,6 +130,14 @@ plutil -insert CFBundleExecutable -string "$assembly" "$plist"
 plutil -insert CFBundleIconFile -string 'RatioMaster.icns' "$plist"
 plutil -insert NSHighResolutionCapable -bool YES "$plist"
 plutil -insert LSMinimumSystemVersion -string "$minimum_os" "$plist"
+# Interface languages: lets macOS offer the per-app language choice (System Settings > General > Language & Region).
+plutil -insert CFBundleDevelopmentRegion -string "en" "$plist"
+plutil -insert CFBundleLocalizations -array "$plist"
+localization_index=0
+for localization in en ar bg ca cs da de el es et fa fi fr he hi hr hu id it ja ko lt lv nb nl pl pt-BR pt-PT ro ru sk sl sq sr sr-Latn sv th tr uk vi zh-Hans zh-Hant; do
+    plutil -insert "CFBundleLocalizations.$localization_index" -string "$localization" "$plist"
+    localization_index=$((localization_index + 1))
+done
 plutil -lint "$plist"
 
 for library in "$macos_directory/"*.dylib; do

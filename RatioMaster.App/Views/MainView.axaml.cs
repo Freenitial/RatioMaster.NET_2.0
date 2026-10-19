@@ -11,6 +11,7 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using RatioMaster.Localization;
 using RatioMaster.Services;
 using RatioMaster.ViewModels;
 
@@ -40,7 +41,6 @@ public partial class MainView : UserControl
     private IInputElement? focusBeforeInfoOverlay;
     private bool infoOverlayActive;
     private MainWindowViewModel? observedMain;
-    private bool startupWarningShown;
 
     internal readonly record struct CloseDecision(CloseBehavior Behavior, bool Remember);
 
@@ -77,11 +77,10 @@ public partial class MainView : UserControl
             MobileInsets.Changed += Relayout;
         }
 
-        // Subscribe once for the app's lifetime. MainView is the root view — created once per process on
-        // both desktop and Android (the activity is set NOT to recreate on rotation) — so there's nothing
-        // to unsubscribe on a transient detach; unsubscribing on Unloaded would silently kill all
-        // notifications after the first detach/reattach.
+        // Kept across transient detach/reattach (unsubscribing on Unloaded would silently end notifications);
+        // released by Detach when a language change replaces this view with a new one.
         NotificationHub.Requested += OnNotification;
+        FlowDirection = Language.Current.RightToLeft ? FlowDirection.RightToLeft : FlowDirection.LeftToRight;
         Loaded += OnLoaded;
         DataContextChanged += (_, _) =>
         {
@@ -116,11 +115,27 @@ public partial class MainView : UserControl
         return closeDialog.Task;
     }
 
+    /// <summary>Releases everything that would keep this view alive once a language change replaced it.</summary>
+    internal void Detach()
+    {
+        NotificationHub.Requested -= OnNotification;
+        MobileInsets.Changed -= Relayout;
+        CancelCloseDialog();
+        if (notifications?.Parent is Panel layer) layer.Children.Remove(notifications);
+        notifications = null;
+        DataContext = null; // also leaves the window model's PropertyChanged
+    }
+
     internal bool TryDismissDialog()
     {
         if (closeDialog is not null)
         {
             CancelCloseDialog();
+            return true;
+        }
+        if (DataContext is MainWindowViewModel { HasPendingBatch: true } batch)
+        {
+            batch.CancelBatchCommand.Execute(null);
             return true;
         }
         if (DataContext is MainWindowViewModel { ChangelogOpen: true } changelog)
@@ -159,7 +174,7 @@ public partial class MainView : UserControl
         {
             if (TopLevel.GetTopLevel(this) is { } top) await top.Launcher.LaunchUriAsync(uri);
         }
-        catch (Exception ex) { NotificationHub.Show("Unable to open link", ex.Message, error: true); }
+        catch (Exception ex) { NotificationHub.Show(Strings.OpenLinkFailedTitle, ex.Message, error: true); }
     }
 
     private void CompleteCloseDialog(CloseBehavior? behavior)
@@ -188,6 +203,13 @@ public partial class MainView : UserControl
 
     private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MainWindowViewModel.HasPendingBatch))
+        {
+            RefreshInteractionState();
+            if (observedMain?.HasPendingBatch == true)
+                Dispatcher.UIThread.Post(() => this.FindControl<Button>("CancelBatchButton")?.Focus(), DispatcherPriority.Input);
+            return;
+        }
         if (e.PropertyName != nameof(MainWindowViewModel.HasInfoOverlay)) return;
         RefreshInteractionState();
         bool open = observedMain?.HasInfoOverlay == true;
@@ -208,7 +230,8 @@ public partial class MainView : UserControl
         }
     }
 
-    private void RefreshInteractionState() => this.FindControl<Grid>("MainContent")!.IsEnabled = closeDialog is null && observedMain?.HasInfoOverlay != true;
+    private void RefreshInteractionState() => this.FindControl<Grid>("MainContent")!.IsEnabled =
+        closeDialog is null && observedMain?.HasInfoOverlay != true && observedMain?.HasPendingBatch != true;
 
     private async void OnDialogKeyDown(object? sender, KeyEventArgs e)
     {
@@ -217,9 +240,10 @@ public partial class MainView : UserControl
             e.Handled = true;
             return;
         }
-        if (DataContext is not MainWindowViewModel { IsShuttingDown: false, HasInfoOverlay: false } vm
+        if (DataContext is not MainWindowViewModel { IsShuttingDown: false, HasInfoOverlay: false, HasPendingBatch: false } vm
             || closeDialog is not null || vm.SelectedTab is not { ManualUpdatePending: false } tab) return;
         bool control = e.KeyModifiers == KeyModifiers.Control;
+        bool controlShift = e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift);
         try
         {
             if (e.Key == Key.F5 && e.KeyModifiers == KeyModifiers.None && tab.ManualUpdateCommand.CanExecute(null))
@@ -231,6 +255,11 @@ public partial class MainView : UserControl
             {
                 e.Handled = true;
                 if (this.GetVisualDescendants().OfType<RatioTabView>().FirstOrDefault() is { } view) await view.BrowseAsync();
+            }
+            else if (controlShift && e.Key == Key.O)
+            {
+                e.Handled = true;
+                if (this.GetVisualDescendants().OfType<RatioTabView>().FirstOrDefault() is { } view) await view.AddFolderAsync();
             }
             else if (control && e.Key == Key.T)
             {
@@ -252,13 +281,13 @@ public partial class MainView : UserControl
                 e.Handled = true;
                 await tab.StopCommand.ExecuteAsync(null);
             }
-            else if (e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift) && e.Key == Key.C)
+            else if (controlShift && e.Key == Key.C)
             {
                 e.Handled = true;
                 if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(tab.HashHex);
             }
         }
-        catch (Exception ex) { NotificationHub.Show("Unable to complete action", ex.Message, error: true); }
+        catch (Exception ex) { NotificationHub.Show(Strings.ActionFailedTitle, ex.Message, error: true); }
     }
 
     private void OnLoaded(object? sender, RoutedEventArgs e)
@@ -274,11 +303,23 @@ public partial class MainView : UserControl
             };
         }
 
-        if (!startupWarningShown && DataContext is MainWindowViewModel { StartupWarning: { Length: > 0 } warning })
+        if (DataContext is MainWindowViewModel { StartupWarningShown: false, StartupWarning: { Length: > 0 } warning } model)
         {
-            startupWarningShown = true;
-            NotificationHub.Show("Saved settings", warning);
+            model.StartupWarningShown = true;
+            NotificationHub.Show(Strings.SavedSettingsTitle, warning);
         }
+
+        // A view rebuilt for another language opens over the same state: an open panel stays modal and focused.
+        RefreshInteractionState();
+        infoOverlayActive = observedMain?.HasInfoOverlay == true;
+        string? focus = observedMain switch
+        {
+            { HasPendingBatch: true } => "CancelBatchButton",
+            { ChangelogOpen: true } => "ChangelogBackButton",
+            { AboutOpen: true } => "LanguageBox",
+            _ => null,
+        };
+        if (focus is not null) Dispatcher.UIThread.Post(() => this.FindControl<Control>(focus)?.Focus(), DispatcherPriority.Input);
         UpdateTabArrows();
         UpdateStatusBarDensity();
         Relayout(); // RenderScaling is available while the TopLevel is attached.

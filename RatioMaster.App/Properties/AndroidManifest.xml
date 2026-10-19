@@ -21,6 +21,7 @@
   <application android:label="RatioMaster.NET"
                android:icon="@mipmap/icon"
                android:allowBackup="true"
-               android:supportsRtl="true">
+               android:supportsRtl="true"
+               android:localeConfig="@xml/locales_config">
   </application>
 </manifest>

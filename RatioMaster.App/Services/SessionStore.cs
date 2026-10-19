@@ -12,7 +12,7 @@ internal static class SessionStore
     private const string FileName = "ratiomaster.session";
     private static readonly SessionRepository Repository = CreateRepository();
     internal static string SettingsDirectory => Path.GetDirectoryName(Repository.PrimaryPath)!;
-    internal static string? LoadWarning => Repository.LoadWarning;
+    internal static SessionLoadWarning LoadWarning => Repository.LoadWarning;
 
     private static SessionRepository CreateRepository()
     {

@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using RatioMaster.Localization;
 
 /// <summary>Checks public releases only when the user requests it.</summary>
 internal static class UpdateChecker
@@ -24,9 +25,9 @@ internal static class UpdateChecker
         request.Headers.UserAgent.ParseAdd("RatioMaster.NET-update-check");
         request.Headers.Accept.ParseAdd("application/vnd.github+json");
         using HttpResponseMessage response = await Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.NotFound) return new("No published release was found.", null);
+        if (response.StatusCode == HttpStatusCode.NotFound) return new(() => Strings.UpdateNoRelease, null);
         if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
-            return new("GitHub is limiting requests. Try again later.", null);
+            return new(() => Strings.UpdateRateLimited, null);
         response.EnsureSuccessStatusCode();
         using Stream source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using MemoryStream body = new();
@@ -34,7 +35,7 @@ internal static class UpdateChecker
         int count;
         while ((count = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
         {
-            if (body.Length + count > 1024 * 1024) throw new IOException("GitHub's response exceeds the 1 MiB limit.");
+            if (body.Length + count > 1024 * 1024) throw new IOException(Strings.UpdateResponseTooLarge);
             body.Write(buffer, 0, count);
         }
         return Parse(body.ToArray(), currentVersion);
@@ -44,21 +45,22 @@ internal static class UpdateChecker
     {
         using JsonDocument document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 });
         JsonElement root = document.RootElement;
-        if (root.ValueKind != JsonValueKind.Object) throw new JsonException("Expected release information.");
+        if (root.ValueKind != JsonValueKind.Object) throw new JsonException(Strings.UpdateVersionUnreadable);
         if (root.TryGetProperty("draft", out JsonElement draft) && draft.ValueKind == JsonValueKind.True
             || root.TryGetProperty("prerelease", out JsonElement prerelease) && prerelease.ValueKind == JsonValueKind.True)
-            return new("No newer stable release was found.", null);
+            return new(() => Strings.UpdateNoNewer, null);
         if (!root.TryGetProperty("tag_name", out JsonElement tag) || tag.ValueKind != JsonValueKind.String
             || !TryVersion(tag.GetString(), out Version? available) || !TryVersion(currentVersion, out Version? current))
-            throw new JsonException("The release version could not be read.");
-        if (available <= current) return new($"Version {currentVersion} is up to date with published releases.", null);
+            throw new JsonException(Strings.UpdateVersionUnreadable);
+        if (available <= current) return new(() => Strings.UpdateUpToDate(currentVersion), null);
         string url = ReleasesUrl;
         if (root.TryGetProperty("html_url", out JsonElement address) && address.ValueKind == JsonValueKind.String
             && Uri.TryCreate(address.GetString(), UriKind.Absolute, out Uri? uri)
             && uri.Scheme == "https" && uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
             && uri.IsDefaultPort && uri.UserInfo.Length == 0
             && uri.AbsolutePath.StartsWith("/Freenitial/RatioMaster.NET_2.0/releases/tag/", StringComparison.Ordinal)) url = uri.AbsoluteUri;
-        return new($"Version {tag.GetString()} is available.", new Uri(url));
+        string release = tag.GetString()!;
+        return new(() => Strings.UpdateAvailable(release), new Uri(url));
     }
 
     private static bool TryVersion(string? text, out Version? result)
@@ -73,4 +75,8 @@ internal static class UpdateChecker
     }
 }
 
-internal sealed record UpdateResult(string Message, Uri? ReleaseUri);
+/// <summary>The outcome of a check; the text is rendered on demand so it follows a later language change.</summary>
+internal sealed record UpdateResult(Func<string> Describe, Uri? ReleaseUri)
+{
+    internal string Message => Describe();
+}

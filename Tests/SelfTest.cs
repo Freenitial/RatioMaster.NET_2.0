@@ -88,7 +88,7 @@ internal static class SelfTest
         engine.Stats += s =>
         {
             last = s;
-            if (s.Uploaded > 0 && s.IntervalRemaining is > 0 and <= 120) progressed.Set();
+            if (s.Uploaded > 0 && s.IntervalRemaining is > 0 and <= 600) progressed.Set();
         };
 
         SessionConfig cfg = new()
@@ -132,8 +132,8 @@ internal static class SelfTest
         string joined = string.Join("\n", log);
         bool connected = Volatile.Read(ref announceRequests) >= 2;
         bool gotPeers = joined.Contains("peers:");
-        bool intervalUpdated = joined.Contains("Updating interval: 120");
-        bool countdownUpdated = scheduled is { IntervalRemaining: > 110 and <= 120 };
+        bool intervalUpdated = joined.Contains("Updating interval: 600");
+        bool countdownUpdated = scheduled is { IntervalRemaining: > 590 and <= 600 };
         const long GiB = 1024L * 1024 * 1024;
         bool sizeWarning = RatioTabViewModel.IsSmallTorrent(8 * GiB - 1)
             && !RatioTabViewModel.IsSmallTorrent(8 * GiB)
@@ -160,14 +160,16 @@ internal static class SelfTest
         bool persistenceValid = PersistenceSelfTest.RunAsync().GetAwaiter().GetResult();
         bool networkPermissionValid = SessionNetworkSelfTest.RunAsync().GetAwaiter().GetResult();
         bool networkValid = NetworkTransportSelfTest.Run() == 0;
+        bool peerWireValid = PeerWireSelfTest.RunAsync().GetAwaiter().GetResult();
+        bool localizationValid = LocalizationSelfTest.Run();
 
         Console.WriteLine();
         Console.WriteLine("──────── RESULTS ────────");
         Report("Tracker connected", connected);
         Report("Peers parsed (IPv4)", gotPeers);
         Report("Peers parsed (IPv6 / peers6, BEP 7)", gotPeers6);
-        Report("Interval honored (120s)", intervalUpdated);
-        Report("Tracker interval replaces configured countdown (1800 -> 120)", countdownUpdated);
+        Report("Interval honored (600s)", intervalUpdated);
+        Report("Tracker interval replaces configured countdown (1800 -> 600)", countdownUpdated);
         Report("Small torrent warning boundary (strictly below 8 GiB)", sizeWarning);
         Report("Countdown uses HH:mm:ss", countdownFormat);
         Report("Confirmed manual update sends an announce without waiting for the next tick", manualSent);
@@ -181,7 +183,7 @@ internal static class SelfTest
             && legacySession && profilesValid && noProcessError
             && countdownUpdated && sizeWarning && countdownFormat && manualSent
             && udpValid && formatsValid && statesValid && bencodeBounds && lifecycleValid && persistenceValid
-            && networkPermissionValid && networkValid;
+            && networkPermissionValid && networkValid && peerWireValid && localizationValid;
         Console.WriteLine();
         Console.WriteLine(pass ? "✅ SELF-TEST PASSED" : "❌ SELF-TEST FAILED");
         return pass ? 0 : 1;
@@ -234,12 +236,12 @@ internal static class SelfTest
 
     private static byte[] AnnounceResponse()
     {
-        // d8:completei5e10:incompletei3e8:intervali120e5:peers6:<v4 peer>6:peers618:<v6 peer>e
+        // d8:completei5e10:incompletei3e8:intervali600e12:min intervali0e5:peers6:<v4 peer>6:peers618:<v6 peer>e
         // NOTE the two easily-confused tokens: "5:peers" + "6:" is the 6-byte IPv4 'peers' value, while
         // "6:peers6" + "18:" is the 18-byte IPv6 'peers6' value (BEP 7). Keys stay bencode-sorted.
         using MemoryStream ms = new();
         void A(string s) => ms.Write(Latin1.GetBytes(s));
-        A("d8:completei5e10:incompletei3e8:intervali120e5:peers6:");
+        A("d8:completei5e10:incompletei3e8:intervali600e12:min intervali0e5:peers6:");
         ms.Write([127, 0, 0, 1, 0x1A, 0xE1]); // 127.0.0.1:6881
         A("6:peers618:");
         ms.Write([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x1A, 0xE1]); // [2001:db8::1]:6881
@@ -300,6 +302,8 @@ internal static class SelfTest
         public string StopWhen => "Never";
 
         public string StopValue => string.Empty;
+
+        public StopConditionSettings StopCondition => new(RatioMaster.Engine.StopCondition.Never, StopValue);
 
         // Captured so the test can assert the engine surfaces a live condition to the tab's alert line.
         public EngineAlert LastAlertLevel { get; private set; } = EngineAlert.None;

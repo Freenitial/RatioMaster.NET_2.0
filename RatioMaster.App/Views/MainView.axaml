@@ -3,6 +3,7 @@
              xmlns:vm="using:RatioMaster.ViewModels"
              xmlns:views="using:RatioMaster.Views"
              xmlns:models="using:RatioMaster.Models"
+             xmlns:loc="using:RatioMaster.Localization"
              x:Class="RatioMaster.Views.MainView"
              x:DataType="vm:MainWindowViewModel"
              Background="{DynamicResource DarkAppBgBrush}"
@@ -25,7 +26,8 @@
              lives INSIDE the scroll, right after the last tab (not pinned to the right edge). -->
         <Grid Grid.Column="0" ColumnDefinitions="Auto,*,Auto">
           <Button Name="TabLeftBtn" Grid.Column="0" Classes="tabnav" IsVisible="False"
-                  Click="OnTabScrollLeft" ToolTip.Tip="Scroll tabs left">
+                  Click="OnTabScrollLeft" ToolTip.Tip="{x:Static loc:Strings.ScrollTabsBack}"
+                  AutomationProperties.Name="{x:Static loc:Strings.ScrollTabsBack}">
             <Path Width="8" Height="15" Stretch="None" StrokeThickness="1.7"
                   StrokeLineCap="Round" StrokeJoin="Round" Data="M 6.5,1 L 1.5,7.5 L 6.5,14"/>
           </Button>
@@ -44,14 +46,16 @@
                     <Button Classes="tab" Classes.active="{Binding IsActive}"
                             Classes.running="{Binding TabIsRunning}" Classes.paused="{Binding TabIsPaused}" Classes.finished="{Binding TabIsFinished}"
                             Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).SelectTabCommand}"
-                            CommandParameter="{Binding}">
+                            CommandParameter="{Binding}" AutomationProperties.Name="{Binding TabName}"
+                            ToolTip.Tip="{Binding TorrentFilePath}">
                       <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
                         <!-- Dot = this tab's state: grey idle, blue running, green finished, yellow warning, red error —
                              so a tab in trouble is visible from the strip even when it isn't selected. -->
                         <Ellipse Width="7" Height="7" VerticalAlignment="Center"
                                  Fill="{Binding DotState, Converter={x:Static views:BoolBrushConverters.TabDot}}"/>
                         <TextBlock Text="{Binding TabName}" VerticalAlignment="Center"/>
-                        <Button Classes="tabclose" Content="✕"
+                        <Button Classes="tabclose" Content="✕" ToolTip.Tip="{x:Static loc:Strings.CloseTab}"
+                                AutomationProperties.Name="{x:Static loc:Strings.CloseTab}"
                                 Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).CloseTabCommand}"
                                 CommandParameter="{Binding}"/>
                       </StackPanel>
@@ -60,20 +64,22 @@
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
               <Button Classes="tabadd" Content="+" Command="{Binding AddTabCommand}" VerticalAlignment="Bottom"
-                      ToolTip.Tip="New RatioMaster tab"/>
+                      ToolTip.Tip="{x:Static loc:Strings.NewTab}" AutomationProperties.Name="{x:Static loc:Strings.NewTab}"/>
             </StackPanel>
           </ScrollViewer>
           <Button Name="TabRightBtn" Grid.Column="2" Classes="tabnav" IsVisible="False"
-                  Click="OnTabScrollRight" ToolTip.Tip="Scroll tabs right">
+                  Click="OnTabScrollRight" ToolTip.Tip="{x:Static loc:Strings.ScrollTabsForward}"
+                  AutomationProperties.Name="{x:Static loc:Strings.ScrollTabsForward}">
             <Path Width="8" Height="15" Stretch="None" StrokeThickness="1.7"
                   StrokeLineCap="Round" StrokeJoin="Round" Data="M 1.5,1 L 6.5,7.5 L 1.5,14"/>
           </Button>
         </Grid>
 
         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center" Margin="0,0,0,4">
-          <TextBlock Text="Local IP" Classes="label" VerticalAlignment="Center"/>
-          <TextBlock Text="{Binding LocalIp}" Classes="value" VerticalAlignment="Center"/>
-          <Button Content="ⓘ" Classes="ghost" Command="{Binding ShowAboutCommand}" ToolTip.Tip="About, diagnostics and updates" Padding="6,2" MinWidth="30"/>
+          <TextBlock Text="{x:Static loc:Strings.LocalIp}" Classes="label" VerticalAlignment="Center"/>
+          <TextBlock Text="{Binding LocalIp}" Classes="value" VerticalAlignment="Center" FlowDirection="LeftToRight"/>
+          <Button Content="ⓘ" Classes="ghost" Command="{Binding ShowAboutCommand}" ToolTip.Tip="{x:Static loc:Strings.AboutTip}"
+                  AutomationProperties.Name="{x:Static loc:Strings.AboutTip}" Padding="6,2" MinWidth="30"/>
         </StackPanel>
       </Grid>
     </Border>
@@ -93,16 +99,18 @@
             Padding="12,6">
       <Grid ColumnDefinitions="Auto,*">
         <TextBlock Name="StatusTextBlock" Grid.Column="0" Text="{Binding SelectedTab.StatusText}" Classes="stat"
+                   ToolTip.Tip="{Binding SelectedTab.StatusText}"
                    Foreground="{DynamicResource TextSecondaryBrush}" MaxWidth="320" TextTrimming="CharacterEllipsis"/>
 
         <WrapPanel Name="StatsPanel" Grid.Column="1" Orientation="Horizontal" ItemSpacing="24" LineSpacing="4" HorizontalAlignment="Right">
-          <TextBlock Classes="stat"><Run Text="Ratio "/><Run Text="{Binding SelectedTab.RatioText}" Foreground="{DynamicResource AccentPrimaryHoverBrush}" FontWeight="SemiBold"/></TextBlock>
-          <TextBlock Classes="stat"><Run Text="↑ "/><Run Text="{Binding SelectedTab.UploadedText}" Foreground="{DynamicResource StateSuccessBrush}"/></TextBlock>
-          <TextBlock Classes="stat"><Run Text="↓ "/><Run Text="{Binding SelectedTab.DownloadedText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
-          <TextBlock Name="SeedersStatus" Classes="stat"><Run Text="Seeders: "/><Run Text="{Binding SelectedTab.SeedersCountText}" Foreground="{DynamicResource StateSuccessBrush}"/></TextBlock>
-          <TextBlock Name="LeechersStatus" Classes="stat"><Run Text="Leechers: "/><Run Text="{Binding SelectedTab.LeechersCountText}" Foreground="{DynamicResource StateErrorBrush}"/></TextBlock>
-          <TextBlock Classes="stat"><Run Text="Time "/><Run Text="{Binding SelectedTab.TotalTimeText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
-          <TextBlock Classes="stat"><Run Text="Next "/><Run Text="{Binding SelectedTab.TimerText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="{x:Static loc:Strings.StatRatio}"/><Run Text=" "/><Run Text="{Binding SelectedTab.RatioText}" Foreground="{DynamicResource AccentPrimaryHoverBrush}" FontWeight="SemiBold"/></TextBlock>
+          <TextBlock Classes="stat" ToolTip.Tip="{x:Static loc:Strings.StatDoneTip}"><Run Text="{x:Static loc:Strings.StatDone}"/><Run Text=" "/><Run Text="{Binding SelectedTab.ProgressText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Classes="stat" ToolTip.Tip="{x:Static loc:Strings.StatUploadedTip}"><Run Text="↑ "/><Run Text="{Binding SelectedTab.UploadedText}" Foreground="{DynamicResource StateSuccessBrush}"/></TextBlock>
+          <TextBlock Classes="stat" ToolTip.Tip="{x:Static loc:Strings.StatDownloadedTip}"><Run Text="↓ "/><Run Text="{Binding SelectedTab.DownloadedText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Name="SeedersStatus" Classes="stat"><Run Text="{x:Static loc:Strings.StatSeeders}"/><Run Text=" "/><Run Text="{Binding SelectedTab.SeedersCountText}" Foreground="{DynamicResource StateSuccessBrush}"/></TextBlock>
+          <TextBlock Name="LeechersStatus" Classes="stat"><Run Text="{x:Static loc:Strings.StatLeechers}"/><Run Text=" "/><Run Text="{Binding SelectedTab.LeechersCountText}" Foreground="{DynamicResource StateErrorBrush}"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="{x:Static loc:Strings.StatTime}"/><Run Text=" "/><Run Text="{Binding SelectedTab.TotalTimeText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
+          <TextBlock Classes="stat"><Run Text="{x:Static loc:Strings.StatNext}"/><Run Text=" "/><Run Text="{Binding SelectedTab.TimerText}" Foreground="{DynamicResource TextSecondaryBrush}"/></TextBlock>
         </WrapPanel>
       </Grid>
     </Border>
@@ -116,17 +124,22 @@
               BorderThickness="1" CornerRadius="8" Padding="18">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="12">
-            <TextBlock Text="About RatioMaster.NET" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
-            <SelectableTextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.AboutTitle}" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
+            <SelectableTextBlock Text="{Binding Diagnostics}" TextWrapping="Wrap" FlowDirection="LeftToRight"/>
+            <StackPanel Spacing="4">
+              <TextBlock Text="{x:Static loc:Strings.LanguageTitle}" Classes="label"/>
+              <ComboBox Name="LanguageBox" ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
+                        HorizontalAlignment="Stretch" AutomationProperties.Name="{x:Static loc:Strings.LanguageTitle}"/>
+            </StackPanel>
             <TextBlock Text="{Binding UpdateMessage}" TextWrapping="Wrap"/>
             <WrapPanel>
-              <Button Content="Check for updates" Command="{Binding CheckForUpdatesCommand}" Margin="0,0,8,6"/>
-              <Button Content="Changelog" Command="{Binding ShowChangelogCommand}" Margin="0,0,8,6"/>
-              <Button Content="Open release" IsVisible="{Binding UpdateAvailable}" Click="OnOpenRelease" Margin="0,0,8,6"/>
+              <Button Content="{x:Static loc:Strings.CheckUpdates}" Command="{Binding CheckForUpdatesCommand}" Margin="0,0,8,6"/>
+              <Button Content="{x:Static loc:Strings.Changelog}" Command="{Binding ShowChangelogCommand}" Margin="0,0,8,6"/>
+              <Button Content="{x:Static loc:Strings.OpenRelease}" IsVisible="{Binding UpdateAvailable}" Click="OnOpenRelease" Margin="0,0,8,6"/>
               <Button Content="GitHub" Click="OnOpenProject" Margin="0,0,8,6"/>
-              <Button Content="Report a bug" Click="OnReportBug" Margin="0,0,8,6"/>
+              <Button Content="{x:Static loc:Strings.ReportBug}" Click="OnReportBug" Margin="0,0,8,6"/>
             </WrapPanel>
-            <Button Name="AboutCloseButton" Content="Close" Command="{Binding CloseAboutCommand}" HorizontalAlignment="Right"/>
+            <Button Name="AboutCloseButton" Content="{x:Static loc:Strings.Close}" Command="{Binding CloseAboutCommand}" HorizontalAlignment="Right"/>
           </StackPanel>
         </ScrollViewer>
       </Border>
@@ -139,10 +152,11 @@
               BorderThickness="1" CornerRadius="12" Padding="16">
         <Grid RowDefinitions="Auto,*,Auto" RowSpacing="12">
           <StackPanel>
-            <TextBlock Text="Changelog" FontSize="22" FontWeight="SemiBold"/>
-            <TextBlock Text="What's new in RatioMaster.NET" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock Text="{x:Static loc:Strings.Changelog}" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock Text="{x:Static loc:Strings.ChangelogSubtitle}" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
           </StackPanel>
-          <ScrollViewer Name="ChangelogScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <!-- The release history is written in English; it keeps its own reading direction. -->
+          <ScrollViewer Name="ChangelogScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FlowDirection="LeftToRight">
             <ItemsControl ItemsSource="{Binding ChangelogReleases}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="models:ChangelogRelease">
@@ -168,9 +182,25 @@
               </ItemsControl.ItemTemplate>
             </ItemsControl>
           </ScrollViewer>
-          <Button Grid.Row="2" Name="ChangelogBackButton" Content="Back" Command="{Binding CloseChangelogCommand}"
+          <Button Grid.Row="2" Name="ChangelogBackButton" Content="{x:Static loc:Strings.Back}" Command="{Binding CloseChangelogCommand}"
                   HorizontalAlignment="Right" MinHeight="40" MinWidth="88"/>
         </Grid>
+      </Border>
+    </Border>
+
+    <Border Name="BatchOverlay" IsVisible="{Binding HasPendingBatch}" Background="#B0000000" Padding="12"
+            KeyboardNavigation.TabNavigation="Cycle">
+      <Border MaxWidth="480" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+              Background="{DynamicResource DarkAppBgBrush}" BorderBrush="{DynamicResource DarkBorderBrush}"
+              BorderThickness="1" CornerRadius="8" Padding="18">
+        <StackPanel Spacing="12">
+          <TextBlock Text="{x:Static loc:Strings.BatchTitle}" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
+          <TextBlock Text="{Binding BatchQuestion}" TextWrapping="Wrap"/>
+          <WrapPanel HorizontalAlignment="Right">
+            <Button Name="CancelBatchButton" Content="{x:Static loc:Strings.Cancel}" Command="{Binding CancelBatchCommand}" Margin="0,0,8,6"/>
+            <Button Content="{x:Static loc:Strings.BatchAdd}" Command="{Binding ConfirmBatchCommand}" Margin="0,0,0,6"/>
+          </WrapPanel>
+        </StackPanel>
       </Border>
     </Border>
 
@@ -181,18 +211,15 @@
               BorderThickness="1" CornerRadius="8" Padding="18">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="12">
-            <TextBlock Text="Active sessions" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
-            <TextBlock Text="Some sessions are running, paused, or changing state. Quitting stops all sessions."
-                       TextWrapping="Wrap"/>
-            <TextBlock Name="TrayUnavailableText" IsVisible="False"
-                       Text="The system tray is unavailable. Keep this window open to access your sessions."
-                       TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.ActiveSessionsTitle}" FontWeight="Bold" FontSize="17" TextWrapping="Wrap"/>
+            <TextBlock Text="{x:Static loc:Strings.ActiveSessionsText}" TextWrapping="Wrap"/>
+            <TextBlock Name="TrayUnavailableText" IsVisible="False" Text="{x:Static loc:Strings.TrayUnavailableText}" TextWrapping="Wrap"/>
             <WrapPanel HorizontalAlignment="Right">
-              <Button Name="CancelCloseButton" Content="Cancel" Click="OnCancelClose" Margin="0,0,8,6"/>
-              <Button Name="BackgroundCloseButton" Content="Minimize to tray" Click="OnBackgroundClose" Margin="0,0,8,6"/>
-              <Button Content="Quit anyway" Click="OnQuitClose" Margin="0,0,0,6"/>
+              <Button Name="CancelCloseButton" Content="{x:Static loc:Strings.Cancel}" Click="OnCancelClose" Margin="0,0,8,6"/>
+              <Button Name="BackgroundCloseButton" Content="{x:Static loc:Strings.MinimizeToTray}" Click="OnBackgroundClose" Margin="0,0,8,6"/>
+              <Button Content="{x:Static loc:Strings.QuitAnyway}" Click="OnQuitClose" Margin="0,0,0,6"/>
             </WrapPanel>
-            <CheckBox Name="RememberCloseSetting" Content="Remember this setting" IsChecked="False"/>
+            <CheckBox Name="RememberCloseSetting" Content="{x:Static loc:Strings.RememberChoice}" IsChecked="False"/>
           </StackPanel>
         </ScrollViewer>
       </Border>

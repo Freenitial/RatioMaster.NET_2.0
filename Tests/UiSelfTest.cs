@@ -189,7 +189,7 @@ internal static class UiSelfTest
             Check(ToolTip.GetIsOpen(size), "size tooltip opens on touch/click");
             ToolTip.SetIsOpen(size, false);
             TerminalScrollBarSelfTest.Run(window, view, vm, Check);
-            MainWindowViewModel all = new(usePersistence: false);
+            using MainWindowViewModel all = new(usePersistence: false);
             MainView main = new() { DataContext = all }; window.Content = main; Pump(window);
             MainWindow defaults = new();
             Check(defaults.Width == 1000 && defaults.Height == 668 && defaults.MinWidth == 360 && defaults.MinHeight == 360,
@@ -237,8 +237,8 @@ internal static class UiSelfTest
             resume.LoadTorrentMetadataFromBytes(TorrentFormatSelfTest.V2FixtureBytes());
             Check(resume.CaptureState().Uploaded == 12345, "same torrent retains persisted counters");
             resume.HasFinished = true;
-            resume.SeedersText = "Seeders: 5";
-            resume.LeechersText = "Leechers: 3";
+            resume.SeedersCountText = "5";
+            resume.LeechersCountText = "3";
             resume.TotalTimeText = "12:34";
             resume.TimerText = "01:23";
             resume.NextUpdateCountdown = "00:01:23";
@@ -246,14 +246,14 @@ internal static class UiSelfTest
             Check(!resume.HasFinished && resume.HashHex.Length == 0 && resume.AlertLevel == TabAlertLevel.Error
                 && resume.StatusText.StartsWith("Failed to load torrent:", StringComparison.Ordinal),
                 "invalid torrent selection clears successful completion and reports its current failure");
-            Check(resume.SeedersText == "Seeders: -" && resume.LeechersText == "Leechers: -"
+            Check(resume.SeedersCountText == "-" && resume.LeechersCountText == "-"
                 && resume.TotalTimeText == "00:00" && resume.TimerText == "idle" && resume.NextUpdateCountdown == "00:00:00",
                 "clearing torrent counters also clears the previous torrent's swarm and timing statistics");
             resume.LoadTorrentMetadataFromBytes(TorrentFormatSelfTest.V2FixtureBytes());
             Check(resume.CaptureState().Uploaded == 0, "invalid file clears unrelated resume counters");
             Check(resume.AlertLevel == TabAlertLevel.None && resume.AlertMessage.Length == 0,
                 "a valid torrent selection clears the preceding load failure");
-            MainWindowViewModel limited = new(usePersistence: false);
+            using MainWindowViewModel limited = new(usePersistence: false);
             for (int index = 1; index <= SessionRepository.MaxTabs; index++) limited.AddTabCommand.Execute(null);
             Check(limited.Tabs.Count == SessionRepository.MaxTabs && !limited.AddTabCommand.CanExecute(null),
                 "adding tabs respects the storage limit before a session becomes unsaveable");
@@ -288,7 +288,7 @@ internal static class UiSelfTest
                 && identity.CustomPort == "43210" && identity.CustomPeers == "30",
                 "restoring a profile retains saved custom identity values");
             identity.SelectedFamily = "qBittorrent";
-            Check(identity.CustomPeerId.StartsWith("-qB5100-", StringComparison.Ordinal) && identity.CustomKey != "1234ABCD",
+            Check(identity.CustomPeerId.StartsWith("-qB5240-", StringComparison.Ordinal) && identity.CustomKey != "1234ABCD",
                 "changing client family always generates matching identity values");
             identity.CustomPeerId = "sentinel";
             identity.SelectedVersion = "5.0.3";
@@ -308,9 +308,9 @@ internal static class UiSelfTest
             reset.GraphValues = new[] { 1.0, 2.0 };
             reset.SetDefaultsCommand.Execute(null);
             Check(reset.LogText.Length == 0 && reset.GraphValues.All(value => value == 0), "Set defaults also clears terminal and graph");
-            reset.SelectedStopWhen = "After time:";
+            reset.SelectedStopWhen = RatioMaster.Engine.StopCondition.AfterTime;
             var stopSettings = ((RatioMaster.Engine.IEngineHost)reset).StopCondition;
-            Check(stopSettings.Condition == "After time:" && stopSettings.Value == "3600",
+            Check(stopSettings.Condition == RatioMaster.Engine.StopCondition.AfterTime && stopSettings.Value == "3600",
                 "live stop settings publish the condition and its threshold as one immutable pair");
             reset.StopValue = "120";
             Check(((RatioMaster.Engine.IEngineHost)reset).StopCondition.Value == "120" && stopSettings.Value == "3600",
@@ -364,9 +364,9 @@ internal static class UiSelfTest
                 Check(status.Bounds.Height >= 34 && stats.Children.All(child => child.Bounds.Right <= stats.Bounds.Width + 0.01
                     && child.Bounds.Bottom <= stats.Bounds.Height + 0.01), "larger status values remain inside the status bar at " + width);
             }
-            Check(((Avalonia.Controls.Documents.Run)main.FindControl<TextBlock>("SeedersStatus")!.Inlines![1]).Foreground
+            Check(((Avalonia.Controls.Documents.Run)main.FindControl<TextBlock>("SeedersStatus")!.Inlines![2]).Foreground
                     is ISolidColorBrush seedsBrush && seedsBrush.Color == ((ISolidColorBrush)main.FindResource("StateSuccessBrush")!).Color
-                && ((Avalonia.Controls.Documents.Run)main.FindControl<TextBlock>("LeechersStatus")!.Inlines![1]).Foreground
+                && ((Avalonia.Controls.Documents.Run)main.FindControl<TextBlock>("LeechersStatus")!.Inlines![2]).Foreground
                     is ISolidColorBrush peersBrush && peersBrush.Color == ((ISolidColorBrush)main.FindResource("StateErrorBrush")!).Color,
                 "seeder counts are green and leecher counts are red");
             vm.LogText = "First response\nWARNING tracker\nLast response\n";
@@ -379,8 +379,8 @@ internal static class UiSelfTest
             if (!string.IsNullOrWhiteSpace(imageDirectory))
             {
                 System.IO.Directory.CreateDirectory(imageDirectory);
-                all.SelectedTab!.SeedersText = "Seeders: 257";
-                all.SelectedTab.LeechersText = "Leechers: 6";
+                all.SelectedTab!.SeedersCountText = "257";
+                all.SelectedTab.LeechersCountText = "6";
                 all.SelectedTab.LogText = string.Join("\n", Enumerable.Range(0, 80).Select(i => $"[{i:00}:00:00] Example tracker response: interval=1800 peers=200 " + new string('x', 90)));
                 foreach ((double width, double height, string name) in new[] { (1000.0, 668.0, "landscape"), (360.0, 740.0, "portrait") })
                 {
@@ -398,6 +398,10 @@ internal static class UiSelfTest
                     frame.Save(System.IO.Path.Combine(imageDirectory, name + ".png"), Avalonia.Media.Imaging.PngBitmapEncoderOptions.Default);
                 }
             }
+            FeatureSelfTest.Run(Check);
+            string? languageShots = Environment.GetEnvironmentVariable("RM_UI_LANGUAGE_SNAPSHOT_DIR");
+            if (!string.IsNullOrWhiteSpace(languageShots)) FeatureSelfTest.LanguageSnapshots(languageShots,
+                Environment.GetEnvironmentVariable("RM_UI_LANGUAGES")?.Split(',', StringSplitOptions.RemoveEmptyEntries) ?? ["fr", "de", "ar", "ja"]);
             Console.WriteLine($"{count} UI checks passed.");
             return 0;
         }

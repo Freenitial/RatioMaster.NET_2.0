@@ -2,5 +2,7 @@
   <PropertyGroup>
     <UseArtifactsOutput>true</UseArtifactsOutput>
     <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+    <!-- The .NET 11 optimized publish pipeline skips Avalonia's XAML compilation: the published window would not open. -->
+    <UseOptimizedPublish>false</UseOptimizedPublish>
   </PropertyGroup>
 </Project>

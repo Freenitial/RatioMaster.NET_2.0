@@ -1,15 +1,15 @@
 namespace RatioMaster.Engine;
 
 using System;
-using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using RatioMaster.BitTorrent;
+using RatioMaster.Localization;
 using RatioMaster.Models;
 using RatioMaster.Services;
 
@@ -18,18 +18,22 @@ internal sealed class RatioEngine(
     IEngineHost host,
     TimeProvider? timeProvider = null,
     Func<string, CancellationToken, Task<ValueDictionary>>? announceTransport = null,
-    bool automaticTicks = true)
+    bool automaticTicks = true,
+    PeerListenerHub? listenerHub = null)
 {
     private const int MinimumIntervalSeconds = 60;
     private const int MaximumIntervalSeconds = 86400;
     private const int RetryDelaySeconds = 60;
     private const int MaximumTrackerIdBytes = 1024;
     private const int MaximumWarningBytes = 4096;
+
+    /// <summary>The refusal of the same completed announce that is treated as final; earlier ones are retried.</summary>
+    private const int MaximumCompletionRefusals = 3;
     private static readonly Encoding Latin1 = Encoding.Latin1;
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly PeerListenerHub hub = listenerHub ?? PeerListenerHub.Shared;
     private readonly object sync = new();
     private readonly SemaphoreSlim announceSignal = new(0, 1);
-    private readonly SemaphoreSlim peerSlots = new(8, 8);
     private readonly CancellationTokenSource lifetime = new();
     private readonly RandomStringGenerator encoding = new();
     private readonly UdpTrackerClient udp = new();
@@ -39,30 +43,35 @@ internal sealed class RatioEngine(
     private TrackerClient http = null!;
     private Uri tracker = null!;
     private bool initialized, active, userPaused, noLeechers, accepted, completedSent, completionPending, finishedSuccessfully;
-    private bool announceRequested, isAnnouncing, stopRequested, trackerRejected;
-    private long uploaded, downloaded, nextAnnounce, lastTick, startedAt, stoppedAt, earliestAnnounce, keyCreatedAt;
+    private bool announceRequested, isAnnouncing, stopRequested, trackerRejected, scrapeRefused;
+    private ListenerState? listenerState;
+
+    // have: bytes present (drives left). uploaded/downloaded: cumulative totals for display; announces report
+    // the growth since this session started, as a client restarting a torrent reports its new session's transfer.
+    private long have, uploaded, downloaded, uploadBase, downloadBase;
+    private long nextAnnounce, lastTick, startedAt, stoppedAt, earliestAnnounce, keyCreatedAt;
     private byte[] infoHash = [];
     private string currentKey = string.Empty;
     private double upFraction, downFraction, upFactor = 0.85, downFactor = 0.85;
-    private int interval, minimumInterval, seeders = -1, leechers = -1;
+    private int interval, minimumInterval, seeders = -1, leechers = -1, completedRefusals;
     private string networkError = string.Empty;
     private string trackerWarning = string.Empty;
     private string trackerId = string.Empty;
     private string listenerProblem = string.Empty;
     private string stopError = string.Empty;
-    private TcpListener? listener;
-    private CancellationTokenSource? listenerLifetime;
-    private readonly List<CancellationTokenSource> listenerLifetimes = [];
-    private readonly HashSet<Task> listenerTasks = [];
+    private PeerListenerHub.Registration? peerRegistration;
     private Task loop = Task.CompletedTask, announcements = Task.CompletedTask;
     private TaskCompletionSource? stopped;
     private TaskCompletionSource<bool>? manualUpdate;
 
     internal event Action<string>? Log;
     internal event Action<EngineStats>? Stats;
-    internal event Action<string>? Stopped;
+    internal event Action<StopNotice>? Stopped;
     internal event Action<string>? KeyChanged;
     internal event Action<EngineAlert, string>? Alert;
+
+    /// <summary>Raised after the tracker accepted an announce: a natural point to persist counters.</summary>
+    internal event Action? Announced;
     internal bool IsRunning { get { lock (sync) return active; } }
     internal bool IsPaused { get { lock (sync) return active && userPaused; } }
     internal bool FinishedSuccessfully { get { lock (sync) return finishedSuccessfully; } }
@@ -73,19 +82,19 @@ internal sealed class RatioEngine(
     {
         lock (sync)
         {
-            if (initialized) throw new InvalidOperationException("Create a session before starting another torrent.");
-            if (config.InfoHash.Length != 20) throw new ArgumentException("Tracker info-hash must be 20 bytes.");
+            if (initialized) throw new InvalidOperationException(Strings.EngineAlreadyStarted);
+            if (config.InfoHash.Length != 20) throw new ArgumentException(Strings.EngineInfoHashLength);
             if (Latin1.GetByteCount(config.PeerID) != 20 || config.PeerID.Any(c => c > 255))
-                throw new ArgumentException("Peer ID must contain exactly 20 single-byte characters.");
+                throw new ArgumentException(Strings.EnginePeerIdLength);
             if (!Uri.TryCreate(config.Tracker, UriKind.Absolute, out Uri? uri)
                 || uri.Scheme is not ("http" or "https" or "udp"))
-                throw new ArgumentException("Use an HTTP, HTTPS or UDP tracker URL.");
+                throw new ArgumentException(Strings.EngineTrackerScheme);
             if (uri.Scheme == "udp" && config.Proxy.Kind != ProxyKind.None)
-                throw new ArgumentException("UDP trackers cannot use this TCP proxy. Choose an HTTP(S) tracker or disable the proxy.");
+                throw new ArgumentException(Strings.UdpProxyUnsupported);
             if (!ushort.TryParse(config.Port, out ushort port) || port == 0)
-                throw new ArgumentException("Listening port must be between 1 and 65535.");
-            if (config.TotalLength < 0) throw new ArgumentException("Invalid torrent size.");
-            if (!double.IsFinite(config.FinishedPercent)) throw new ArgumentException("Finished percentage must be finite.");
+                throw new ArgumentException(Strings.EnginePortRange);
+            if (config.TotalLength < 0) throw new ArgumentException(Strings.EngineInvalidSize);
+            if (!double.IsFinite(config.FinishedPercent)) throw new ArgumentException(Strings.EngineFinishedFinite);
             cfg = config;
             profile = config.Client.Snapshot();
             sessionProxy = new ProxyConfig
@@ -97,11 +106,12 @@ internal sealed class RatioEngine(
             currentKey = config.Key;
             tracker = uri;
             http = new TrackerClient(sessionProxy, message => Log?.Invoke(message));
-            uploaded = Math.Max(0, config.ResumeUploaded);
-            downloaded = Math.Clamp(config.ResumeDownloaded > 0 ? config.ResumeDownloaded
-                : (long)(config.TotalLength * (decimal)Math.Clamp(config.FinishedPercent, 0, 100) / 100m), 0, config.TotalLength);
-            completedSent = downloaded == config.TotalLength;
-            interval = Math.Clamp(config.Interval, MinimumIntervalSeconds, MaximumIntervalSeconds);
+            have = Math.Clamp(config.InitialHave
+                ?? (long)(config.TotalLength * (decimal)Math.Clamp(config.FinishedPercent, 0, 100) / 100m), 0, config.TotalLength);
+            uploaded = uploadBase = Math.Max(0, config.ResumeUploaded);
+            downloaded = downloadBase = Math.Max(0, config.ResumeDownloaded);
+            completedSent = have == config.TotalLength;
+            interval = RegularInterval(Math.Clamp(config.Interval, MinimumIntervalSeconds, MaximumIntervalSeconds));
             lastTick = startedAt = keyCreatedAt = clock.GetTimestamp();
             Schedule(interval);
             initialized = active = true;
@@ -109,10 +119,10 @@ internal sealed class RatioEngine(
             loop = automaticTicks ? Task.Run(TickLoopAsync) : Task.CompletedTask;
             announcements = Task.Run(AnnounceLoopAsync);
         }
-        Log?.Invoke("CLIENT EMULATION INFO:");
-        Log?.Invoke("Name: " + profile.Name);
-        Log?.Invoke("PeerID: " + PeerIdentityText.Format(cfg.PeerID));
-        Log?.Invoke("Port: " + cfg.Port);
+        Log?.Invoke(Strings.LogEmulationInfo);
+        Log?.Invoke(Strings.LogEmulationName(profile.Name));
+        Log?.Invoke(Strings.LogEmulationPeerId(PeerIdentityText.Format(cfg.PeerID)));
+        Log?.Invoke(Strings.LogEmulationPort(cfg.Port));
         RefreshListener();
         Publish();
     }
@@ -128,16 +138,19 @@ internal sealed class RatioEngine(
             Accumulate();
             userPaused = value;
         }
-        Log?.Invoke(value ? "Paused by you." : "Resumed.");
+        Log?.Invoke(value ? Strings.AlertPausedByYou : Strings.LogResumed);
         Publish();
     }
 
     internal void ManualUpdate() => _ = ManualUpdateAsync();
+
+    /// <summary>Refused while the tracker's minimum interval runs: trackers ignore or warn about earlier updates.</summary>
     internal Task<bool> ManualUpdateAsync()
     {
         lock (sync)
         {
-            if (!active || stopRequested || isAnnouncing || announceRequested) return Task.FromResult(false);
+            if (!active || stopRequested || isAnnouncing || announceRequested || clock.GetTimestamp() < earliestAnnounce)
+                return Task.FromResult(false);
             manualUpdate = new(TaskCreationOptions.RunContinuationsAsynchronously);
             QueueAnnounce();
             return manualUpdate.Task;
@@ -155,7 +168,7 @@ internal sealed class RatioEngine(
             }
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        catch (Exception ex) { Fail("Session error: " + ex.Message); _ = StopAsync("Stopped: session error"); }
+        catch (Exception ex) { Fail(Strings.SessionError(ex.Message)); _ = StopAsync(Strings.StoppedSessionError, error: true); }
     }
 
     /// <summary>Accumulates elapsed time and submits work to the session's single announce worker.</summary>
@@ -166,7 +179,7 @@ internal sealed class RatioEngine(
         {
             if (!active || stopRequested) return;
             Accumulate();
-            bool completed = !completedSent && !completionPending && downloaded == cfg.TotalLength;
+            bool completed = !completedSent && !completionPending && have == cfg.TotalLength;
             if (completed) completionPending = true;
             stopReason = StopReason();
             stopRequested = stopReason is not null;
@@ -178,7 +191,6 @@ internal sealed class RatioEngine(
             _ = StopAsync(stopReason, objectiveReached: true);
             return;
         }
-        RefreshListener();
         Publish();
     }
 
@@ -193,11 +205,13 @@ internal sealed class RatioEngine(
             if (host.RandomUploadEnabled) upFactor = Drift(upFactor);
             uploaded = AddBytes(uploaded, host.UploadRateBytes, seconds, host.RandomUploadEnabled ? upFactor : 1, ref upFraction);
         }
-        if (downloaded < cfg.TotalLength)
+        if (have < cfg.TotalLength)
         {
             if (host.RandomDownloadEnabled) downFactor = Drift(downFactor);
-            downloaded = Math.Min(cfg.TotalLength, AddBytes(downloaded, host.DownloadRateBytes, seconds,
+            long gained = Math.Min(cfg.TotalLength - have, AddBytes(0, host.DownloadRateBytes, seconds,
                 host.RandomDownloadEnabled ? downFactor : 1, ref downFraction));
+            have += gained;
+            downloaded = downloaded > long.MaxValue - gained ? long.MaxValue : downloaded + gained;
         }
     }
 
@@ -214,10 +228,11 @@ internal sealed class RatioEngine(
     private long Deadline(int seconds)
     {
         try { return checked(clock.GetTimestamp() + (long)Math.Max(1, seconds) * clock.TimestampFrequency); }
-        catch (OverflowException) { throw new TrackerScheduleException("The tracker delay cannot be represented by the session clock."); }
+        catch (OverflowException) { throw new TrackerScheduleException(Strings.TrackerDelayUnrepresentable); }
     }
     private void Schedule(int seconds) => nextAnnounce = Deadline(seconds);
-    private int Remaining() => (int)Math.Clamp(Math.Ceiling((nextAnnounce - clock.GetTimestamp()) / (double)clock.TimestampFrequency), 0, int.MaxValue);
+    private int Remaining() => SecondsUntil(nextAnnounce);
+    private int SecondsUntil(long timestamp) => (int)Math.Clamp(Math.Ceiling((timestamp - clock.GetTimestamp()) / (double)clock.TimestampFrequency), 0, int.MaxValue);
 
     private void QueueAnnounce()
     {
@@ -258,8 +273,8 @@ internal sealed class RatioEngine(
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            Fail("Session error: " + ex.Message);
-            _ = StopAsync("Stopped: session error");
+            Fail(Strings.SessionError(ex.Message));
+            _ = StopAsync(Strings.StoppedSessionError, error: true);
         }
         finally
         {
@@ -287,6 +302,14 @@ internal sealed class RatioEngine(
             Publish();
             ValueDictionary dict = await SendAnnounceAsync(eventName, ct).ConfigureAwait(false);
             ThrowIfRejected(dict);
+            lock (sync)
+            {
+                // Recorded before any cancellation check: a stop racing this response must neither resend
+                // the accepted completed nor skip the stopped that a started tracker now expects.
+                if (!accepted) lastTick = clock.GetTimestamp();
+                accepted = true;
+                if (eventName == "completed") { completedSent = true; completionPending = false; completedRefusals = 0; }
+            }
             ct.ThrowIfCancellationRequested();
             if (!IsRunning) return false;
             int? responseInterval = ReadTrackerDelay(dict, "interval");
@@ -296,32 +319,32 @@ internal sealed class RatioEngine(
             lock (sync)
             {
                 if (!active) return false;
-                if (!accepted) lastTick = clock.GetTimestamp();
-                accepted = true;
-                if (eventName == "completed") { completedSent = true; completionPending = false; }
                 networkError = string.Empty;
-                if (responseInterval is { } seconds && seconds > 0) interval = Math.Max(seconds, MinimumIntervalSeconds);
-                minimumInterval = responseMinimum ?? 0;
+                if (responseInterval is { } seconds && seconds > 0) interval = RegularInterval(seconds);
+                minimumInterval = responseMinimum ?? profile.DefaultMinIntervalSeconds;
                 earliestAnnounce = minimumInterval > 0 ? Deadline(minimumInterval) : clock.GetTimestamp();
                 Schedule(Math.Max(interval, minimumInterval));
                 haveCounts = ApplyCounts(dict);
                 warning = ApplyResponseMetadata(dict);
             }
-            if (warning.Length > 0) Log?.Invoke("Tracker warning: " + warning);
-            Log?.Invoke("Updating interval: " + Math.Max(interval, minimumInterval));
+            if (warning.Length > 0) Log?.Invoke(Strings.TrackerWarning(warning));
+            Log?.Invoke(Strings.LogUpdatingInterval(Math.Max(interval, minimumInterval)));
             if (dict.Contains("peers")) LogPeers(dict["peers"]);
             if (dict.Contains("peers6")) LogPeers6(dict["peers6"]);
             Publish();
-            RefreshListener(retryFailed: true);
+            Announced?.Invoke();
             if (!haveCounts && host.RequestScrape) await ScrapeAsync(ct).ConfigureAwait(false);
             return IsRunning;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (TrackerRejectedException ex) { Reject(ex.Message); }
+        catch (TrackerRejectedException ex)
+        {
+            if (eventName != "completed" || !RetryRefusedCompletion(ex.Message)) Reject(ex.Message);
+        }
         catch (TrackerScheduleException ex)
         {
             Fail(ex.Message);
-            _ = StopAsync("Stopped: tracker schedule error");
+            _ = StopAsync(Strings.StoppedScheduleError, error: true);
         }
         catch (Exception ex)
         {
@@ -331,30 +354,55 @@ internal sealed class RatioEngine(
                 nextAnnounce = Math.Max(Deadline(RetryDelaySeconds), earliestAnnounce);
             }
             Fail(ex.Message);
-            Log?.Invoke("Will retry in " + Remaining() + " seconds.");
+            Log?.Invoke(Strings.LogWillRetry(Remaining()));
         }
         return false;
+    }
+
+    /// <summary>
+    /// Some trackers (NexusPHP among them) turn a too-early completed announce into a failure reason. The torrent
+    /// is still complete, so the event stays pending and is sent again once the tracker's minimum interval allows,
+    /// instead of ending the session and losing the completion. Repeated refusals are final.
+    /// </summary>
+    private bool RetryRefusedCompletion(string message)
+    {
+        lock (sync)
+        {
+            // A session already stopping delivers the pending completed itself before leaving.
+            if (!active) return true;
+            if (++completedRefusals >= MaximumCompletionRefusals) return false;
+            nextAnnounce = earliestAnnounce = Math.Max(Deadline(Math.Max(RetryDelaySeconds, minimumInterval)), earliestAnnounce);
+            trackerWarning = Strings.CompletionRefused(message);
+        }
+        Log?.Invoke(Strings.CompletionRefused(message));
+        Log?.Invoke(Strings.LogWillRetry(Remaining()));
+        Publish();
+        return true;
     }
 
     private void Reject(string message)
     {
         lock (sync) trackerRejected = true;
         if (!IsRunning) return;
-        Fail("Tracker error: " + message);
-        _ = StopAsync("Stopped: tracker rejection - " + message, false);
+        Fail(Strings.TrackerError(message));
+        _ = StopAsync(Strings.StoppedTrackerRejection(message), false, error: true);
     }
 
+    /// <summary>The tracker's regular interval, never shorter than the emulated client's own floor.</summary>
+    private int RegularInterval(int seconds) => Math.Max(seconds, Math.Max(MinimumIntervalSeconds, profile.IntervalFloorSeconds));
+
     private static int? ReadCount(ValueDictionary dict, string name) =>
-        long.TryParse(BEncode.String(dict[name]), NumberStyles.Integer, CultureInfo.InvariantCulture, out long number) && number >= 0
+        dict.Contains(name) && long.TryParse(BEncode.String(dict[name]), NumberStyles.Integer, CultureInfo.InvariantCulture, out long number) && number >= 0
             ? (int)Math.Min(int.MaxValue, number) : null;
 
     private static int? ReadTrackerDelay(ValueDictionary response, string name)
     {
+        if (!response.Contains(name)) return null;
         string? text = BEncode.String(response[name]);
         if (string.IsNullOrWhiteSpace(text)) return null;
         if (!long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seconds)
             || seconds > int.MaxValue)
-            throw new TrackerScheduleException("Tracker " + name + " is outside the supported integer-second range; automatic announces have been stopped.");
+            throw new TrackerScheduleException(Strings.TrackerDelayOutOfRange(name));
         return seconds >= 0 ? (int)seconds : null;
     }
 
@@ -370,7 +418,7 @@ internal sealed class RatioEngine(
             else
             {
                 trackerId = string.Empty;
-                string notice = "Tracker ID ignored: expected at most 1024 bytes.";
+                string notice = Strings.TrackerIdIgnored;
                 trackerWarning = trackerWarning.Length > 0 ? trackerWarning + " " + notice : notice;
             }
         }
@@ -401,7 +449,7 @@ internal sealed class RatioEngine(
             if (pause != noLeechers)
             {
                 noLeechers = pause;
-                Log?.Invoke(pause ? "Paused: no leechers." : "Leechers available: upload resumed.");
+                Log?.Invoke(pause ? Strings.AlertNoLeechers : Strings.LogLeechersBack);
             }
         }
         return complete.HasValue && incomplete.HasValue;
@@ -416,9 +464,9 @@ internal sealed class RatioEngine(
         bool keyRotated = false;
         lock (sync)
         {
-            up = uploaded;
-            down = downloaded;
-            left = Math.Max(0, cfg.TotalLength - down);
+            up = Math.Max(0, uploaded - uploadBase);
+            down = Math.Max(0, downloaded - downloadBase);
+            left = Math.Max(0, cfg.TotalLength - have);
             if (cfg.KeyIsGenerated && profile.KeyRefreshInterval > TimeSpan.Zero
                 && clock.GetElapsedTime(keyCreatedAt) >= profile.KeyRefreshInterval)
             {
@@ -435,7 +483,7 @@ internal sealed class RatioEngine(
         if (tracker.Scheme == "udp")
         {
             if (!uint.TryParse(keyValue, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint key))
-                throw new IOException("UDP tracker key must be a 32-bit hexadecimal value.");
+                throw new IOException(Strings.UdpKeyFormat);
             return await udp.AnnounceAsync(tracker, new UdpAnnounceRequest
             {
                 InfoHash = infoHash, PeerId = Latin1.GetBytes(cfg.PeerID), Downloaded = down,
@@ -444,17 +492,55 @@ internal sealed class RatioEngine(
                 Event = eventName switch { "completed" => 1, "started" => 2, "stopped" => 3, _ => 0 },
             }, ct).ConfigureAwait(false);
         }
-        string query = profile.Query
-            .Replace("{infohash}", encoding.UrlEncode(Latin1.GetString(infoHash), profile.HashUpperCase, profile.UrlEncoding))
-            .Replace("{peerid}", profile.EncodePeerId(cfg.PeerID))
-            .Replace("{port}", cfg.Port).Replace("{uploaded}", up.ToString(CultureInfo.InvariantCulture))
-            .Replace("{downloaded}", down.ToString(CultureInfo.InvariantCulture)).Replace("{left}", left.ToString(CultureInfo.InvariantCulture))
-            .Replace("{key}", encoding.UrlEncode(keyValue, false, profile.UrlEncoding)).Replace("{numwant}", encoding.UrlEncode(numWant, false, profile.UrlEncoding))
-            .Replace("{event}", eventName.Length > 0 ? "&event=" + eventName : string.Empty);
-        string url = AppendTrackerQuery(cfg.Tracker, query);
-        if (responseTrackerId.Length > 0)
-            url = SetQueryParameter(url, "trackerid", encoding.UrlEncode(responseTrackerId, false, profile.UrlEncoding));
+        string url = BuildAnnounceUrl(eventName, up, down, left, keyValue, numWant, responseTrackerId);
         return RequireResponse(await http.RequestAsync(url, profile, ct).ConfigureAwait(false));
+    }
+
+    internal string BuildAnnounceUrl(string eventName, long up, long down, long left, string keyValue, string numWant, string responseTrackerId) =>
+        BuildAnnounceUrl(profile, cfg.Tracker, infoHash, cfg.PeerID, cfg.Port, eventName, up, down, left, keyValue, numWant, responseTrackerId, AnnouncedAddresses());
+
+    /// <summary>The announce URL exactly as the emulated client writes it; pure, so request fixtures can pin every byte.</summary>
+    internal static string BuildAnnounceUrl(ClientProfile profile, string trackerUrl, byte[] infoHash, string peerId, string port, string eventName,
+        long up, long down, long left, string keyValue, string numWant, string responseTrackerId, IReadOnlyList<IPAddress> addresses)
+    {
+        RandomStringGenerator encoding = new();
+        string query = profile.Query
+            .Replace("{infohash}", encoding.UrlEncode(Latin1.GetString(infoHash), profile.HashUpperCase, profile.Unreserved))
+            .Replace("{peerid}", profile.EncodePeerId(peerId))
+            .Replace("{port}", port).Replace("{uploaded}", up.ToString(CultureInfo.InvariantCulture))
+            .Replace("{downloaded}", down.ToString(CultureInfo.InvariantCulture)).Replace("{left}", left.ToString(CultureInfo.InvariantCulture))
+            .Replace("{key}", encoding.UrlEncode(keyValue, false, profile.Unreserved)).Replace("{numwant}", encoding.UrlEncode(numWant, false, profile.Unreserved))
+            .Replace("{event}", eventName.Length > 0 ? "&event=" + eventName : string.Empty);
+        string url = AppendTrackerQuery(trackerUrl, query);
+        if (responseTrackerId.Length > 0)
+            url = SetQueryParameter(url, "trackerid", encoding.UrlEncode(responseTrackerId, false, profile.Unreserved));
+        foreach (IPAddress address in addresses)
+            url += (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? "&ipv4=" : "&ipv6=")
+                + encoding.UrlEncode(address.ToString(), profile.HashUpperCase, profile.Unreserved);
+        return url;
+    }
+
+    /// <summary>
+    /// The public addresses the emulated client adds to its announce (libtorrent: private torrents; Transmission
+    /// 4.1: always). Never through a proxy: the proxy hides the real address, which the parameters would reveal.
+    /// </summary>
+    private IReadOnlyList<IPAddress> AnnouncedAddresses()
+    {
+        if (sessionProxy.Kind != ProxyKind.None) return [];
+        try
+        {
+            return profile.GlobalAddresses switch
+            {
+                GlobalAddressMode.PrivateTorrents when cfg.IsPrivate => NetInfo.GetGlobalInterfaceAddresses(),
+                GlobalAddressMode.Always => NetInfo.GetGlobalSourceAddresses(),
+                _ => [],
+            };
+        }
+        catch (Exception)
+        {
+            // Optional parameters: an unreadable network configuration simply leaves them out.
+            return [];
+        }
     }
 
     private static string WithoutFragment(string url)
@@ -463,13 +549,15 @@ internal sealed class RatioEngine(
         return fragment >= 0 ? url[..fragment] : url;
     }
 
-    /// <summary>Preserves the original escaped path and query while adding tracker parameters.</summary>
+    /// <summary>
+    /// Preserves the original escaped path and query while adding tracker parameters. Like libtorrent and Transmission,
+    /// an existing query is always followed by '&amp;', even when the URL already ends with '?' or '&amp;'.
+    /// </summary>
     private static string AppendTrackerQuery(string url, string query)
     {
         url = WithoutFragment(url);
         if (query.Length == 0) return url;
-        string separator = !url.Contains('?') ? "?" : url.EndsWith('?') || url.EndsWith('&') ? string.Empty : "&";
-        return url + separator + query;
+        return url + (url.Contains('?') ? "&" : "?") + query;
     }
 
     private static string SetQueryParameter(string url, string name, string value)
@@ -493,23 +581,24 @@ internal sealed class RatioEngine(
 
     private static ValueDictionary RequireResponse(TrackerResponse? response)
     {
-        if (response is null) throw new IOException("No usable response from tracker.");
+        if (response is null) throw new IOException(Strings.TrackerNoResponse);
         if (response.Dict is { } dict) ThrowIfRejected(dict);
         if (response.Error.Length > 0) throw new IOException(response.Error);
-        if (response.StatusCode >= 400) throw new IOException($"Tracker returned HTTP {response.StatusCode}.");
-        if (response.Oversized) throw new IOException("Tracker response exceeds the size limit.");
-        return response.Dict ?? throw new IOException("Could not decode the tracker response.");
+        if (response.StatusCode >= 400) throw new IOException(Strings.TrackerHttpStatus(response.StatusCode));
+        if (response.Oversized) throw new IOException(Strings.TrackerResponseTooLarge);
+        return response.Dict ?? throw new IOException(Strings.TrackerUndecodable);
     }
 
     private static void ThrowIfRejected(ValueDictionary response)
     {
         if (!response.Contains("failure reason")) return;
         string failure = response["failure reason"] is ValueString value ? value.String : string.Empty;
-        throw new TrackerRejectedException(string.IsNullOrWhiteSpace(failure) ? "Tracker explicitly rejected the announce." : failure);
+        throw new TrackerRejectedException(string.IsNullOrWhiteSpace(failure) ? Strings.TrackerRejectedEmpty : failure);
     }
 
     private async Task ScrapeAsync(CancellationToken ct)
     {
+        lock (sync) { if (scrapeRefused) return; }
         try
         {
             ValueDictionary? result;
@@ -522,36 +611,43 @@ internal sealed class RatioEngine(
                 int slash = path.LastIndexOf('/');
                 if (slash < 0 || !path[(slash + 1)..].StartsWith("announce", StringComparison.OrdinalIgnoreCase)) return;
                 string scrape = path[..(slash + 1)] + "scrape" + path[(slash + 9)..] + (query >= 0 ? original[query..] : string.Empty);
-                string url = AppendTrackerQuery(scrape, "info_hash=" + encoding.UrlEncode(Latin1.GetString(infoHash), profile.HashUpperCase, profile.UrlEncoding));
+                string url = AppendTrackerQuery(scrape, "info_hash=" + encoding.UrlEncode(Latin1.GetString(infoHash), profile.HashUpperCase, profile.Unreserved));
                 ValueDictionary dict = RequireResponse(await http.RequestAsync(url, profile, ct).ConfigureAwait(false));
                 string warning = ReadWarning(dict);
                 if (warning.Length > 0)
                 {
                     lock (sync) { if (active) trackerWarning = warning; }
-                    Log?.Invoke("Tracker warning: " + warning);
+                    Log?.Invoke(Strings.TrackerWarning(warning));
                 }
-                if (dict["files"] is not ValueDictionary files) return;
-                result = files[Latin1.GetString(infoHash)] as ValueDictionary;
+                if (!dict.Contains("files") || dict["files"] is not ValueDictionary files) return;
+                string key = Latin1.GetString(infoHash);
+                result = files.Contains(key) ? files[key] as ValueDictionary : null;
             }
             ct.ThrowIfCancellationRequested();
             lock (sync) { if (active && result is not null) ApplyCounts(result); }
             Publish();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (TrackerRejectedException ex) { Reject(ex.Message); }
-        catch (Exception ex) { if (IsRunning) Log?.Invoke("Scrape unavailable: " + ex.Message); }
+        catch (TrackerRejectedException ex)
+        {
+            // A tracker refusing scrapes still serves announces: give up scraping, never the session.
+            lock (sync) scrapeRefused = true;
+            if (IsRunning) Log?.Invoke(Strings.ScrapeUnavailable(ex.Message));
+        }
+        catch (Exception ex) { if (IsRunning) Log?.Invoke(Strings.ScrapeUnavailable(ex.Message)); }
     }
 
     internal void Stop() => _ = StopAsync();
-    internal Task StopAsync(string reason = "stopped", bool sendStopped = true, bool objectiveReached = false)
+    internal Task StopAsync(string? reason = null, bool sendStopped = true, bool objectiveReached = false, bool error = false)
     {
+        StopNotice notice = new(reason ?? Strings.StatusStopped, error, reason is null);
         TaskCompletionSource completion;
         lock (sync)
         {
             if (stopped is not null) return stopped.Task;
             if (!initialized) return Task.CompletedTask;
             Accumulate();
-            if (!completedSent && downloaded == cfg.TotalLength) completionPending = true;
+            if (!completedSent && have == cfg.TotalLength) completionPending = true;
             active = false;
             stopRequested = true;
             stoppedAt = clock.GetTimestamp();
@@ -559,9 +655,9 @@ internal sealed class RatioEngine(
             completion = stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         lifetime.Cancel();
-        lock (sync) CloseListener();
+        CloseListener();
         Publish();
-        Stopped?.Invoke(reason);
+        Stopped?.Invoke(notice);
         _ = FinishStopAsync(completion, sendStopped, objectiveReached);
         return completion.Task;
     }
@@ -569,34 +665,35 @@ internal sealed class RatioEngine(
     private async Task FinishStopAsync(TaskCompletionSource completion, bool sendStopped, bool objectiveReached)
     {
         string? failure = null;
-        string operation = "Session shutdown";
+        string operation = Strings.OperationShutdown;
         try
         {
             using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(8));
-            Task[] listeners;
-            lock (sync) listeners = listenerTasks.ToArray();
-            await Task.WhenAll(listeners.Append(loop).Append(announcements)).WaitAsync(timeout.Token).ConfigureAwait(false);
-            bool rejected;
-            lock (sync) rejected = trackerRejected;
-            if (rejected && objectiveReached) failure = "Tracker rejection prevented successful completion.";
-            if (sendStopped && !rejected)
+            await Task.WhenAll(loop, announcements).WaitAsync(timeout.Token).ConfigureAwait(false);
+            bool rejected, started;
+            lock (sync) (rejected, started) = (trackerRejected, accepted);
+            if (rejected && objectiveReached) failure = Strings.RejectionPreventedCompletion;
+
+            // libtorrent and Transmission only send stopped to a tracker that accepted the started announce.
+            if (sendStopped && !rejected && started)
             {
-                if (objectiveReached && completionPending && !completedSent)
+                // A finished download announces completed before leaving, whatever ended the session:
+                // a real client sends it as soon as the last piece arrives, so it is never skipped.
+                if (completionPending && !completedSent)
                 {
                     try
                     {
-                        operation = "Completion notification";
+                        operation = Strings.OperationCompletion;
                         ValueDictionary completedResponse = await SendAnnounceAsync("completed", timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
                         ThrowIfRejected(completedResponse);
                         lock (sync) { completedSent = true; completionPending = false; }
                     }
-                    catch (TrackerRejectedException) { throw; }
-                    catch (Exception ex)
+                    catch (Exception ex) when (ex is not OperationCanceledException || !timeout.IsCancellationRequested)
                     {
-                        failure = "Completion notification not delivered: " + ex.Message;
+                        failure = Strings.CompletionNotDelivered(ex.Message);
                     }
                 }
-                operation = "Stop notification";
+                operation = Strings.OperationStop;
                 ValueDictionary response = await SendAnnounceAsync("stopped", timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
                 ThrowIfRejected(response);
             }
@@ -604,17 +701,15 @@ internal sealed class RatioEngine(
         catch (Exception ex)
         {
             if (ex is TrackerRejectedException) Reject(ex.Message);
-            string stopFailure = operation + " failed: " + ex.Message;
+            string stopFailure = Strings.OperationFailed(operation, ex.Message);
             failure = failure is null ? stopFailure : failure + "; " + stopFailure;
         }
         finally
         {
             lock (sync)
             {
-                finishedSuccessfully = objectiveReached && sendStopped && failure is null && !trackerRejected;
+                finishedSuccessfully = objectiveReached && sendStopped && accepted && failure is null && !trackerRejected;
                 if (failure is not null) stopError = failure;
-                foreach (CancellationTokenSource source in listenerLifetimes) source.Dispose();
-                listenerLifetimes.Clear();
             }
             if (failure is not null) Log?.Invoke(failure);
             Publish();
@@ -626,20 +721,24 @@ internal sealed class RatioEngine(
     {
         lock (sync)
         {
-            double percent = cfg is null || cfg.TotalLength == 0 ? 100 : downloaded * 100.0 / cfg.TotalLength;
+            long total = cfg?.TotalLength ?? 0;
+            double percent = cfg is null || total == 0 ? 100 : have * 100.0 / total;
+            long denominator = Math.Max(have, downloaded);
             var alert = CurrentAlert();
             return new EngineStats
             {
                 IsActive = active,
                 SampleElapsedSeconds = initialized ? Math.Max(0, clock.GetElapsedTime(startedAt, lastTick).TotalSeconds) : 0,
                 AlertLevel = alert.Level, AlertMessage = alert.Message,
-                Uploaded = uploaded, Downloaded = downloaded, TotalSize = cfg?.TotalLength ?? 0,
-                Left = Math.Max(0, (cfg?.TotalLength ?? 0) - downloaded), FinishedPercent = percent,
-                Ratio = downloaded > 0 ? (uploaded / (double)downloaded).ToString("0.00", CultureInfo.InvariantCulture) : "0.00",
+                Uploaded = uploaded, Downloaded = downloaded, Have = have, TotalSize = total,
+                Left = Math.Max(0, total - have), FinishedPercent = percent,
+                Ratio = denominator > 0 ? uploaded / (double)denominator : 0,
                 Seeders = seeders, Leechers = leechers, IntervalRemaining = active ? Remaining() : 0,
+                ManualUpdateWait = active ? SecondsUntil(earliestAnnounce) : 0,
                 TotalRunSeconds = initialized ? (int)Math.Min(int.MaxValue, clock.GetElapsedTime(startedAt, active ? clock.GetTimestamp() : stoppedAt).TotalSeconds) : 0,
                 NumPeers = cfg?.NumWant ?? "0", SeedMode = percent >= 100, IsPaused = active && userPaused,
                 UploadPausedNoLeechers = active && noLeechers, IsAnnouncing = active && (isAnnouncing || announceRequested),
+                CompletionPending = completionPending && !completedSent,
             };
         }
     }
@@ -657,11 +756,11 @@ internal sealed class RatioEngine(
     {
         if (networkError.Length > 0) return (EngineAlert.Error, networkError);
         if (!active) return (EngineAlert.None, string.Empty);
-        if (userPaused) return (EngineAlert.Warning, "Paused by you.");
-        if (noLeechers) return (EngineAlert.Warning, "Paused: no leechers.");
+        if (userPaused) return (EngineAlert.Warning, Strings.AlertPausedByYou);
+        if (noLeechers) return (EngineAlert.Warning, Strings.AlertNoLeechers);
         if (trackerWarning.Length > 0) return (EngineAlert.Warning, trackerWarning);
         if (listenerProblem.Length > 0) return (EngineAlert.Warning, listenerProblem);
-        return !accepted ? (EngineAlert.Warning, "Waiting for tracker.") : (EngineAlert.Ok, "Tracker OK");
+        return !accepted ? (EngineAlert.Warning, Strings.AlertWaitingForTracker) : (EngineAlert.Ok, Strings.AlertTrackerOk);
     }
     private void Fail(string message)
     {
@@ -675,127 +774,95 @@ internal sealed class RatioEngine(
         StopConditionSettings condition = host.StopCondition;
         double value = condition.Value.ParseDoubleOr(double.NaN);
         if (!double.IsFinite(value) || value < 0) return null;
-        return SessionSettings.NormalizeStopCondition(condition.Condition) switch
+        long denominator = Math.Max(have, downloaded);
+        return condition.Condition switch
         {
-            "When seeders <" when seeders >= 0 && seeders < value => "Stopped: seeders below threshold",
-            "When leechers <" when leechers >= 0 && leechers < value => "Stopped: leechers below threshold",
-            "When leechers / seeders <" when seeders > 0 && leechers >= 0 && leechers / (double)seeders < value => "Stopped: leechers/seeders below threshold",
-            "When ratio >" when downloaded > 0 && uploaded / (double)downloaded >= value => "Stopped: target ratio reached",
-            "When upload >" when uploaded / 1073741824.0 > value => "Stopped: uploaded above threshold",
-            "When download >" when downloaded / 1073741824.0 > value => "Stopped: downloaded above threshold",
-            "After time:" when value > 0 && clock.GetElapsedTime(startedAt).TotalSeconds >= value => "Stopped: time limit reached",
+            StopCondition.SeedersBelow when seeders >= 0 && seeders < value => Strings.StoppedSeedersBelow,
+            StopCondition.LeechersBelow when leechers >= 0 && leechers < value => Strings.StoppedLeechersBelow,
+            StopCondition.SwarmRatioBelow when seeders > 0 && leechers >= 0 && leechers / (double)seeders < value => Strings.StoppedSwarmRatioBelow,
+            StopCondition.RatioAbove when denominator > 0 && uploaded / (double)denominator >= value => Strings.StoppedRatioReached,
+            StopCondition.UploadAbove when uploaded / 1073741824.0 > value => Strings.StoppedUploadAbove,
+            StopCondition.DownloadAbove when downloaded / 1073741824.0 > value => Strings.StoppedDownloadAbove,
+            StopCondition.AfterTime when value > 0 && clock.GetElapsedTime(startedAt).TotalSeconds >= value => Strings.StoppedTimeLimit,
             _ => null,
         };
     }
 
+    // ══════════════ Incoming peers ══════════════
+
     private void CloseListener()
     {
-        listenerLifetime?.Cancel();
-        listenerLifetime = null;
-        listener?.Stop();
-        listener = null;
-    }
-
-    private void RefreshListener(bool retryFailed = false)
-    {
+        PeerListenerHub.Registration? registration;
         lock (sync)
         {
-            bool needed = active && !stopRequested && host.UseTcpListener && sessionProxy.Kind == ProxyKind.None;
-            if (!needed) { CloseListener(); listenerFailed = false; listenerProblem = string.Empty; return; }
-            if (listener is not null || (listenerFailed && !retryFailed)) return;
-            try
-            {
-                TcpListener candidate = new(Socket.OSSupportsIPv6 ? IPAddress.IPv6Any : IPAddress.Any, int.Parse(cfg.Port, CultureInfo.InvariantCulture));
-                candidate.Server.ExclusiveAddressUse = true;
-                if (Socket.OSSupportsIPv6) candidate.Server.DualMode = true;
-                try { candidate.Start(8); }
-                catch { candidate.Stop(); throw; }
-                listener = candidate;
-                listenerLifetime = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                listenerLifetimes.Add(listenerLifetime);
-                listenerFailed = false;
-                listenerProblem = string.Empty;
-                Log?.Invoke("Started TCP listener on port " + cfg.Port);
-                TrackListenerTask(AcceptAsync(candidate, listenerLifetime.Token));
-            }
-            catch (Exception ex)
-            {
-                listenerProblem = "TCP listener unavailable: " + ex.Message;
-                Log?.Invoke(listenerProblem);
-                // Bind retries follow accepted announces or an explicit listener toggle.
-                listenerFailed = true;
-            }
+            registration = peerRegistration;
+            peerRegistration = null;
+            listenerProblem = string.Empty;
+            listenerState = null;
         }
-    }
-    private bool listenerFailed;
-    private void TrackListenerTask(Task task)
-    {
-        lock (sync) listenerTasks.Add(task);
-        _ = task.ContinueWith(completed =>
-        {
-            lock (sync) listenerTasks.Remove(completed);
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        registration?.Dispose();
     }
 
-    private async Task AcceptAsync(TcpListener server, CancellationToken ct)
+    /// <summary>Joins or leaves the shared listener of this session's port as the listener option changes.</summary>
+    internal void RefreshListener()
     {
-        try
+        bool needed;
+        lock (sync) needed = active && !stopRequested && host.UseTcpListener && sessionProxy.Kind == ProxyKind.None;
+        if (!needed)
         {
-            while (!ct.IsCancellationRequested)
-            {
-                Socket socket = await server.AcceptSocketAsync(ct).ConfigureAwait(false);
-                if (!await peerSlots.WaitAsync(0).ConfigureAwait(false)) { socket.Dispose(); continue; }
-                lock (sync)
-                {
-                    if (!active || ct.IsCancellationRequested || !ReferenceEquals(listener, server))
-                    {
-                        socket.Dispose();
-                        peerSlots.Release();
-                        continue;
-                    }
-                    TrackListenerTask(HandshakeAsync(socket, ct));
-                }
-            }
+            CloseListener();
+            return;
         }
-        catch (OperationCanceledException) { }
-        catch (SocketException) { }
-        catch (ObjectDisposedException) { }
+        lock (sync) { if (peerRegistration is not null) return; }
+        int port = int.Parse(cfg.Port, CultureInfo.InvariantCulture);
+        PeerTorrent torrent = new()
+        {
+            InfoHashes = cfg.PeerInfoHashes ?? [infoHash],
+            PeerId = Latin1.GetBytes(cfg.PeerID),
+            Wire = profile.PeerWire,
+            AdvertisedPort = port,
+            IsPrivate = cfg.IsPrivate,
+            IsHybrid = cfg.IsHybrid,
+            Metadata = cfg.Metadata,
+            PieceCount = cfg.PieceCount,
+            Realistic = cfg.Realistic,
+            Progress = () => { lock (sync) return cfg.TotalLength == 0 ? 1 : have / (double)cfg.TotalLength; },
+            Log = message => { if (IsRunning) Log?.Invoke(message); },
+        };
+        PeerListenerHub.Registration registration;
+        try { registration = hub.Register(port, torrent, OnListenerState); }
+        catch (Exception ex)
+        {
+            OnListenerState(ListenerState.Failed, ex.Message);
+            return;
+        }
+        bool keep;
+        lock (sync)
+        {
+            keep = active && !stopRequested && peerRegistration is null;
+            if (keep) peerRegistration = registration;
+        }
+        if (!keep) registration.Dispose();
     }
-    private async Task HandshakeAsync(Socket socket, CancellationToken ct)
+
+    private void OnListenerState(ListenerState state, string detail)
     {
-        try
+        string message = state switch
         {
-            using (socket)
-            using (NetworkStream stream = new(socket, ownsSocket: false))
-            using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
-            {
-                timeout.CancelAfter(TimeSpan.FromSeconds(3));
-                byte[] request = new byte[68];
-                await stream.ReadExactlyAsync(request, timeout.Token).ConfigureAwait(false);
-                if (request[0] != 19 || !request.AsSpan(1, 19).SequenceEqual("BitTorrent protocol"u8)
-                    || !request.AsSpan(28, 20).SequenceEqual(infoHash)) return;
-                byte[] reply = new byte[68];
-                reply[0] = 19;
-                "BitTorrent protocol"u8.CopyTo(reply.AsSpan(1));
-                infoHash.CopyTo(reply, 28);
-                Latin1.GetBytes(cfg.PeerID).CopyTo(reply, 48);
-                await stream.WriteAsync(reply, timeout.Token).ConfigureAwait(false);
-                if (cfg.Realistic && GetStats().SeedMode && cfg.PieceCount > 0)
-                {
-                    int count = checked((int)((cfg.PieceCount + 7L) / 8));
-                    if (count > 1024 * 1024) return;
-                    byte[] bits = new byte[count + 5];
-                    BinaryPrimitives.WriteInt32BigEndian(bits, count + 1);
-                    bits[4] = 5;
-                    bits.AsSpan(5).Fill(255);
-                    int remainder = cfg.PieceCount % 8;
-                    if (remainder != 0) bits[^1] = (byte)(255 << (8 - remainder));
-                    await stream.WriteAsync(bits, timeout.Token).ConfigureAwait(false);
-                }
-            }
+            ListenerState.Listening => string.Empty,
+            ListenerState.Duplicate => Strings.ListenerDuplicate(cfg.Port),
+            ListenerState.Failed => Strings.ListenerUnavailable(cfg.Port, detail),
+            _ => string.Empty,
+        };
+        bool changed;
+        lock (sync)
+        {
+            changed = active && (listenerState != state || listenerProblem != message);
+            if (changed) (listenerState, listenerProblem) = (state, message);
         }
-        catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
-        finally { peerSlots.Release(); }
+        if (!changed || state == ListenerState.Starting) return;
+        Log?.Invoke(message.Length > 0 ? message : Strings.ListenerStarted(cfg.Port));
+        Publish();
     }
 
     private void LogPeers(IBEncodeValue peers)
@@ -813,7 +880,7 @@ internal sealed class RatioEngine(
         }
         catch (Exception ex)
         {
-            Log?.Invoke("Error parsing peers: " + ex.Message);
+            Log?.Invoke(Strings.PeersUnreadable(ex.Message));
         }
     }
 
@@ -831,8 +898,7 @@ internal sealed class RatioEngine(
         }
         catch (Exception ex)
         {
-            Log?.Invoke("Error parsing peers6: " + ex.Message);
+            Log?.Invoke(Strings.PeersUnreadable(ex.Message));
         }
     }
-
 }

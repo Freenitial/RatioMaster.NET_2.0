@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using RatioMaster.Localization;
 
 /// <summary>Serializes snapshots in request order and isolates fallback paths to their installation.</summary>
 internal sealed class SessionRepository(string primaryPath, string? fallbackPath = null, string? legacyPath = null, string? migrationPath = null)
@@ -18,7 +19,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
     private long requestedRevision;
     private readonly HashSet<string> damagedPaths = new(StringComparer.Ordinal);
     internal string PrimaryPath { get; } = primaryPath;
-    internal string? LoadWarning { get; private set; }
+    internal SessionLoadWarning LoadWarning { get; private set; }
     private string[] Paths => new[] { PrimaryPath, fallbackPath }.OfType<string>().Distinct().ToArray();
 
     internal void Save(SessionData data)
@@ -37,9 +38,9 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
 
     private static string Encode(SessionData data)
     {
-        if (data.Tabs is null || data.Tabs.Count > MaxTabs) throw new IOException($"A saved session supports at most {MaxTabs} tabs.");
+        if (data.Tabs is null || data.Tabs.Count > MaxTabs) throw new IOException(Strings.SessionTooManyTabs(MaxTabs));
         string json = JsonSerializer.Serialize(data, AppJsonContext.Default.SessionData);
-        if (Encoding.UTF8.GetByteCount(json) > MaxFileBytes) throw new IOException("The saved session exceeds the 16 MiB limit.");
+        if (Encoding.UTF8.GetByteCount(json) > MaxFileBytes) throw new IOException(Strings.SessionTooLarge);
         return json;
     }
 
@@ -75,7 +76,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
                     catch (UnauthorizedAccessException) { }
                 }
             }
-            throw new IOException("Could not save the session. Check available disk space and folder permissions.", failure);
+            throw new IOException(Strings.SessionSaveFailed, failure);
         }
     }
 
@@ -83,7 +84,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
     {
         lock (sync)
         {
-            LoadWarning = null;
+            LoadWarning = SessionLoadWarning.None;
             string[] candidates = Paths.Concat(new[] { migrationPath }.OfType<string>()).Distinct()
                 .SelectMany(path => new[] { path, path + ".bak" })
                 .OrderByDescending(LastWrite).ToArray();
@@ -99,7 +100,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
                     SessionData data = Decode(reader.ReadToEnd());
                     damagedPaths.Remove(path);
                     if (unreadable || path.EndsWith(".bak", StringComparison.Ordinal))
-                        LoadWarning = "The latest session could not be read. A previous saved snapshot was restored.";
+                        LoadWarning = SessionLoadWarning.RestoredBackup;
                     return data;
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -108,9 +109,9 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
                     unreadable = true;
                 }
             }
-            if (unreadable) LoadWarning = "The saved session could not be read. Its files have been preserved.";
+            if (unreadable) LoadWarning = SessionLoadWarning.Unreadable;
             else if (legacyPath is not null && File.Exists(legacyPath))
-                LoadWarning = "A session exists in the shared temporary folder. It was preserved but not loaded because its installation cannot be identified.";
+                LoadWarning = SessionLoadWarning.SharedTemporary;
             return null;
         }
     }
@@ -124,7 +125,12 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
             throw new JsonException("Expected a session tab array.");
         SessionData data = JsonSerializer.Deserialize(json, AppJsonContext.Default.SessionData)
             ?? throw new JsonException("The session is empty.");
-        if (data.FormatVersion is < 1 or > 2) throw new JsonException("This session format is not supported.");
+        // Versions before 2.1 wrote no format number: they are format 1, not the current format the property defaults to.
+        if (!document.RootElement.TryGetProperty(nameof(SessionData.FormatVersion), out _)) data.FormatVersion = 1;
+        if (data.FormatVersion is < 1 or > SessionData.CurrentFormatVersion) throw new JsonException("This session format is not supported.");
+        data.LoadedFormatVersion = data.FormatVersion;
+        data.Language ??= string.Empty;
+        data.ClientPorts ??= [];
         if (data.Tabs is null || data.Tabs.Count > MaxTabs) throw new JsonException("Invalid session tab list.");
         JsonElement.ArrayEnumerator rawTabs = default;
         bool hasRawTabs = document.RootElement.TryGetProperty("Tabs", out JsonElement tabs) && tabs.ValueKind == JsonValueKind.Array;
@@ -142,7 +148,7 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
                     && down.ValueKind is JsonValueKind.True or JsonValueKind.False) tab.RandomDownload = down.GetBoolean();
             }
         }
-        data.FormatVersion = 2;
+        data.FormatVersion = SessionData.CurrentFormatVersion;
         return data;
     }
 
@@ -159,7 +165,8 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
         tab.Interval ??= "1800";
         tab.Finished ??= "100";
         tab.StopWhen ??= "Never";
-        tab.StopWhen = SessionSettings.NormalizeStopCondition(tab.StopWhen);
+        tab.ProgressFinished ??= string.Empty;
+        tab.FinishedChoice ??= string.Empty;
         tab.StopValue ??= string.Empty;
         tab.Family ??= "qBittorrent";
         tab.Version ??= "5.1.0";
@@ -182,4 +189,13 @@ internal sealed class SessionRepository(string primaryPath, string? fallbackPath
         catch (IOException) { return DateTime.MinValue; }
         catch (UnauthorizedAccessException) { return DateTime.MinValue; }
     }
+}
+
+/// <summary>Problems found while restoring the session, rendered in the interface language once it is known.</summary>
+internal enum SessionLoadWarning
+{
+    None,
+    RestoredBackup,
+    Unreadable,
+    SharedTemporary,
 }

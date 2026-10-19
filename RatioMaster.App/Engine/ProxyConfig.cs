@@ -1,7 +1,7 @@
 namespace RatioMaster.Engine;
 
 /// <summary>Supported tracker-connection proxy types (matches the UI dropdown order).</summary>
-internal enum ProxyKind
+public enum ProxyKind
 {
     None = 0,
     HttpConnect = 1,

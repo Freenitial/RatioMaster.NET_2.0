@@ -2,6 +2,7 @@
 namespace RatioMaster;
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
@@ -29,10 +30,20 @@ internal static class PersistenceSelfTest
             using MemoryStream activation = new(new byte[] { 1 });
             using MemoryStream invalidActivation = new(new byte[] { 0 });
             using MemoryStream emptyActivation = new();
-            Check(await SingleInstance.ReadActivationAsync(activation, CancellationToken.None)
-                && !await SingleInstance.ReadActivationAsync(invalidActivation, CancellationToken.None)
-                && !await SingleInstance.ReadActivationAsync(emptyActivation, CancellationToken.None),
+            Check(await SingleInstance.ReadRequestAsync(activation, CancellationToken.None) is { Count: 0 }
+                && await SingleInstance.ReadRequestAsync(invalidActivation, CancellationToken.None) is null
+                && await SingleInstance.ReadRequestAsync(emptyActivation, CancellationToken.None) is null,
                 "instance activation accepts its signal byte and rejects empty or invalid payloads");
+            string relative = Path.Combine("folder", "relative.torrent");
+            using MemoryStream withFiles = new(SingleInstance.EncodeRequest(["--flag", relative]));
+            Check(await SingleInstance.ReadRequestAsync(withFiles, CancellationToken.None) is [string sent] && sent == Path.GetFullPath(relative),
+                "a launch hands over its files as absolute paths, without its options");
+            List<string> received = [];
+            SingleInstance.Deliver(["early.torrent"]);
+            SingleInstance.Attach(files => received.AddRange(files));
+            SingleInstance.Deliver(["later.torrent"]);
+            Check(received.SequenceEqual(["early.torrent", "later.torrent"]),
+                "a launch made while the window is being built is delivered once the window attaches");
             string pipeName = "ratiomaster-activation-test-" + Guid.NewGuid().ToString("N");
             using NamedPipeServerStream activationServer = new(pipeName, PipeDirection.In, 1,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
@@ -43,7 +54,7 @@ internal static class PersistenceSelfTest
             await activationClient.ConnectAsync(connectionDeadline.Token);
             await connection;
             using CancellationTokenSource cancelledRead = new();
-            Task<bool> idleRead = SingleInstance.ReadActivationAsync(activationServer, cancelledRead.Token);
+            Task<IReadOnlyList<string>?> idleRead = SingleInstance.ReadRequestAsync(activationServer, cancelledRead.Token);
             Check(!idleRead.IsCompleted, "an idle activation client waits asynchronously for its signal");
             cancelledRead.Cancel();
             bool cancelled = false;
@@ -87,7 +98,7 @@ internal static class PersistenceSelfTest
             Check(repository.Load() is { Tabs.Count: 2 } loaded && loaded.Tabs[0].Uploaded == 2
                 && loaded.Tabs[1].Uploaded == 77 && loaded.Tabs[1].Tracker.EndsWith("/second"), "atomic snapshots preserve independent tabs and tracker overrides");
             File.WriteAllText(path, "{truncated");
-            Check(repository.Load()?.Tabs[0].Uploaded == 1 && repository.LoadWarning is not null,
+            Check(repository.Load()?.Tabs[0].Uploaded == 1 && repository.LoadWarning != SessionLoadWarning.None,
                 "corrupt latest snapshot restores backup and reports recovery");
             repository.Save(Snapshot(3));
             File.WriteAllText(path, "{damaged again");
@@ -100,7 +111,7 @@ internal static class PersistenceSelfTest
             string legacy = Path.Combine(directory, "shared.json");
             File.WriteAllText(legacy, JsonSerializer.Serialize(Snapshot(123), AppJsonContext.Default.SessionData));
             SessionRepository separate = new(Path.Combine(directory, "other", "session.json"), legacyPath: legacy);
-            Check(separate.Load() is null && separate.LoadWarning is not null && File.Exists(legacy),
+            Check(separate.Load() is null && separate.LoadWarning == SessionLoadWarning.SharedTemporary && File.Exists(legacy),
                 "unowned shared temporary session is preserved without cross-installation restore");
             string blockedPath = Path.Combine(directory, "blocked");
             File.WriteAllText(blockedPath, "not a directory");
@@ -110,12 +121,15 @@ internal static class PersistenceSelfTest
             SessionData old = SessionStore.Decode("{\"Tabs\":[{\"RandUp\":false,\"RandDown\":false,\"Uploaded\":12,\"CustomKey\":\"saved\"}]}");
             Check(!old.Tabs[0].RandomUpload && !old.Tabs[0].RandomDownload && old.Tabs[0].Uploaded == 12
                 && old.Tabs[0].KeyIsGenerated is null, "legacy random flags and ambiguous custom provenance are preserved");
+            Check(old.LoadedFormatVersion == 1 && SessionStore.Decode("{\"FormatVersion\":2,\"Tabs\":[]}").LoadedFormatVersion == 2,
+                "a session written without a format number (2.0) is migrated as format 1, not taken for the current format");
             SessionData modern = SessionStore.Decode("{\"Tabs\":[{\"RandUp\":false,\"RandomUpload\":true,\"Family\":null,\"Downloaded\":-1}]}");
             Check(modern.Tabs[0].RandomUpload && modern.Tabs[0].Family == "qBittorrent" && modern.Tabs[0].Downloaded == 0,
                 "modern fields win over legacy aliases and null/negative values normalize");
             SessionData oldStops = SessionStore.Decode("{\"Tabs\":[{\"StopWhen\":\"When uploaded >\"},{\"StopWhen\":\"When downloaded >\"}]}");
-            Check(oldStops.Tabs[0].StopWhen == "When upload >" && oldStops.Tabs[1].StopWhen == "When download >",
-                "saved stop conditions migrate to the compact labels without changing their meaning");
+            Check(SessionSettings.ParseStopCondition(oldStops.Tabs[0].StopWhen) == RatioMaster.Engine.StopCondition.UploadAbove
+                && SessionSettings.ParseStopCondition(oldStops.Tabs[1].StopWhen) == RatioMaster.Engine.StopCondition.DownloadAbove,
+                "saved stop conditions keep their meaning across label revisions");
             foreach (string malformed in new[] { "null", "[]", "{\"Tabs\":null}", "{\"Tabs\":[null]}" })
             {
                 bool rejected = false;
@@ -168,7 +182,7 @@ internal static class PersistenceSelfTest
             }
             if (endpoint >= 3) readyAfterEmpty.TrySetResult();
         }
-        Task listener = SingleInstance.ListenAsync(name, () =>
+        Task listener = SingleInstance.ListenAsync(name, _ =>
         {
             Interlocked.Increment(ref activations);
             activated.TrySetResult();
