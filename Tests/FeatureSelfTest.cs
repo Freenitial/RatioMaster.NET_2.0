@@ -119,8 +119,10 @@ internal static class FeatureSelfTest
             string previous = Environment.CurrentDirectory;
             try
             {
+                // Compared with the directory as the system resolves it: macOS reports /var/folders as /private/var/folders.
                 Environment.CurrentDirectory = folder;
-                check(MainWindowViewModel.ExpandPaths(["b.torrent"]) is [{ Path: { } absolute }] && absolute == Path.Combine(folder, "b.torrent"),
+                string expected = Path.Combine(Environment.CurrentDirectory, "b.torrent");
+                check(MainWindowViewModel.ExpandPaths(["b.torrent"]) is [{ Path: { } absolute }] && absolute == expected && File.Exists(absolute),
                     "a relative command-line path is saved as an absolute path");
             }
             finally { Environment.CurrentDirectory = previous; }
