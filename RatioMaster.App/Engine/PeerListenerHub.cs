@@ -37,6 +37,9 @@ internal sealed class PeerListenerHub
     private static readonly TimeSpan BindRetry = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long the accept thread waits for a peer before checking whether the listener stopped.</summary>
+    private static readonly TimeSpan AcceptPoll = TimeSpan.FromMilliseconds(500);
+
     /// <summary>A peer that sends nothing, or stops reading what is sent, for this long is dropped.</summary>
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(6);
     private readonly object sync = new();
@@ -46,13 +49,14 @@ internal sealed class PeerListenerHub
     internal static PeerListenerHub Shared { get; } = new();
 
     /// <summary>
-    /// Dual-stack, and exclusive on Windows: there a shared dual-mode bind succeeds even when another application
-    /// holds the IPv4 port, which would leave IPv4 peers to that application. Elsewhere .NET's default address
-    /// reuse lets a restarted session bind again past the TIME_WAIT of connections it closed.
+    /// Dual-stack, and exclusive except on Linux: on Windows and macOS a dual-mode bind with address reuse succeeds
+    /// even when another application holds the IPv4 port, which would leave IPv4 peers to that application. Linux
+    /// refuses that bind anyway, and .NET's default address reuse there lets a restarted session bind again past
+    /// the TIME_WAIT of connections it closed (elsewhere the bind retry covers that short wait).
     /// </summary>
     internal static void ConfigureListenSocket(Socket socket)
     {
-        if (OperatingSystem.IsWindows()) socket.ExclusiveAddressUse = true;
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsAndroid()) socket.ExclusiveAddressUse = true;
         if (socket.AddressFamily == AddressFamily.InterNetworkV6) socket.DualMode = true;
     }
 
@@ -247,15 +251,24 @@ internal sealed class PeerListenerHub
                 {
                     TcpListener candidate = new(Socket.OSSupportsIPv6 ? IPAddress.IPv6Any : IPAddress.Any, port);
                     ConfigureListenSocket(candidate.Server);
-                    try { candidate.Start(32); }
-                    catch { candidate.Stop(); throw; }
+                    CancellationTokenSource accepting = new();
+                    try
+                    {
+                        candidate.Start(32);
+                        candidate.Server.Blocking = false;
+                        new Thread(() => AcceptLoop(candidate, accepting.Token)) { IsBackground = true, Name = "Peer listener " + port }.Start();
+                    }
+                    catch
+                    {
+                        accepting.Dispose();
+                        candidate.Stop();
+                        throw;
+                    }
                     socket = candidate;
                     failure = string.Empty;
                     retry?.Dispose();
                     retry = null;
-                    running = new CancellationTokenSource();
-                    CancellationToken token = running.Token;
-                    _ = Task.Run(() => AcceptAsync(candidate, token));
+                    running = accepting;
                     state = ListenerState.Listening;
                 }
                 catch (Exception error) when (error is SocketException or ObjectDisposedException or UnauthorizedAccessException)
@@ -310,19 +323,33 @@ internal sealed class PeerListenerHub
             }
         }
 
-        private async Task AcceptAsync(TcpListener server, CancellationToken ct)
+        /// <summary>
+        /// Accepts on a dedicated thread with synchronous calls. On macOS a connection reset while it waited in the
+        /// backlog can be handed over without a peer address: .NET then fails while completing an asynchronous accept
+        /// on a thread-pool thread, which ends the process. Here that error reaches this loop and is skipped like a
+        /// reset. The listening socket is non-blocking and polled, so stopping never waits for another peer.
+        /// </summary>
+        private void AcceptLoop(TcpListener server, CancellationToken ct)
         {
-            while (true)
+            Socket listening = server.Server;
+            while (!ct.IsCancellationRequested)
             {
                 Socket client;
-                try { client = await server.AcceptSocketAsync(ct).ConfigureAwait(false); }
+                try
+                {
+                    if (!listening.Poll(AcceptPoll, SelectMode.SelectRead)) continue;
+                    client = listening.Accept();
+                }
                 catch (Exception) when (ct.IsCancellationRequested) { return; }
 
-                // A connection reset while it waited in the backlog only concerns that connection.
-                catch (SocketException error) when (error.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { continue; }
-                catch (Exception error) when (error is SocketException or ObjectDisposedException or InvalidOperationException)
+                // A connection that vanished or was reset while it waited only concerns that connection.
+                catch (SocketException error) when (error.SocketErrorCode is SocketError.WouldBlock or SocketError.ConnectionReset or SocketError.ConnectionAborted) { continue; }
+                catch (ArgumentException) { continue; }
+                catch (Exception error)
                 {
-                    Lost(server, error.Message);
+                    // A thread must never end with an exception: that would end the process.
+                    try { Lost(server, error.Message); }
+                    catch (Exception) { }
                     return;
                 }
                 if (!hub.connectionSlots.Wait(0))
@@ -341,6 +368,8 @@ internal sealed class PeerListenerHub
             Registration? owner = null;
             try
             {
+                // Accepted from a non-blocking listener, the socket inherits that mode; streams need a blocking socket.
+                client.Blocking = true;
                 client.NoDelay = true;
                 using NetworkStream network = new(client, ownsSocket: false);
                 PeerTransport transport = new(network);
